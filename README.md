@@ -114,6 +114,13 @@ print(df.head())
 
 ---
 
+## Known Limitations (v0.1.0)
+
+- **Multi-finger touchpad gestures** (pinch-to-zoom, rotate, 3-finger app-switch, 4-finger virtual-desktop-switch) cannot be captured. Windows reserves these for its own shell-level gesture handling and never exposes them to background apps through any API — this isn't something CursorTrack (or any equivalent tool) can work around.
+- **Two-finger scroll may not be captured on some touchpads**, even with `--capture scroll` or `all` and `pynput` installed. Physical/USB mouse wheel scrolling is unaffected and always captured. See [docs/architecture.md](docs/architecture.md#4-touchpad-gesture-capture-limitations) for why.
+
+---
+
 ## Architecture and File Format
 
 - Read [docs/architecture.md](docs/architecture.md) to learn how CursorTrack manages OS-independent layers.
