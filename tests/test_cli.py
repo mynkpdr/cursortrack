@@ -1,0 +1,436 @@
+"""Integration tests for the cursortrack Typer CLI interface."""
+
+from __future__ import annotations
+
+import json
+import os
+import tempfile
+from typing import Any, Callable
+
+from typer.testing import CliRunner
+
+from cursortrack.backends import BACKEND_CLASSES
+from cursortrack.backends.base import InputBackend
+from cursortrack.cli.app import app
+from cursortrack.core.session import Session
+
+runner = CliRunner()
+
+
+class CornerAbortBackend(InputBackend):
+    """Mock backend whose reported position becomes a screen corner after N reads.
+
+    Used to deterministically exercise the playback fail-safe (which normally
+    depends on a human physically moving the mouse) without a real display.
+    """
+
+    #: Number of read_position() calls to answer normally before reporting a corner.
+    #: Set by each test before registering this class, since get_backend()
+    #: instantiates backends with no constructor arguments.
+    trigger_after = 0
+
+    def __init__(self) -> None:
+        self.pos = (500, 500)
+        self.reads = 0
+
+    def read_position(self) -> tuple[int, int]:
+        self.reads += 1
+        if self.reads > type(self).trigger_after:
+            return (0, 0)
+        return self.pos
+
+    def set_position(self, x: int, y: int) -> None:
+        self.pos = (x, y)
+
+    def get_screen_size(self) -> tuple[int, int]:
+        return (1920, 1080)
+
+    def click(self, button: str, pressed: bool) -> None:
+        pass
+
+    def scroll(self, sdx: int, sdy: int) -> None:
+        pass
+
+    def start_listening(
+        self, on_event: Callable[[str, tuple[Any, ...], float], None], capture_mask: int
+    ) -> None:
+        pass
+
+    def stop_listening(self) -> None:
+        pass
+
+
+def test_cli_version() -> None:
+    """Verify printing package version is successful."""
+    result = runner.invoke(app, ["--version"])
+    assert result.exit_code == 0
+    assert "cursortrack version" in result.stdout
+
+
+def test_cli_doctor() -> None:
+    """Verify running the doctor check environment command runs cleanly."""
+    result = runner.invoke(app, ["doctor"])
+    assert result.exit_code == 0
+    assert "CursorTrack System Diagnostics" in result.stdout
+
+
+def test_cli_devices() -> None:
+    """Verify active backend driver checks print target metrics."""
+    result = runner.invoke(app, ["devices"])
+    assert result.exit_code == 0
+    assert "Input Backends & Devices" in result.stdout
+
+
+def test_cli_record_and_info_and_export_and_play() -> None:
+    """Run an end-to-end integration test of the recording lifecycle."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        session_file = os.path.join(tmpdir, "test_session.ctrk")
+
+        # 1. Record move and clicks for 1 second in mock backend (headless safe)
+        record_res = runner.invoke(
+            app,
+            [
+                "record",
+                "-o",
+                session_file,
+                "--backend",
+                "mock",
+                "--capture",
+                "move,click",
+                "--hz",
+                "50",
+                "--seconds",
+                "1",
+                "--codec",
+                "raw",
+                "--no-spin",
+                "-q",
+            ],
+        )
+        assert record_res.exit_code == 0
+        assert os.path.exists(session_file)
+
+        # 2. Run info command to verify header structure
+        info_res = runner.invoke(app, ["info", session_file])
+        assert info_res.exit_code == 0
+        assert "Format Version" in info_res.stdout
+        assert "Total Event Count" in info_res.stdout
+
+        # 3. Export to CSV
+        export_csv = os.path.join(tmpdir, "exported.csv")
+        export_res_csv = runner.invoke(
+            app, ["export", session_file, "--to", "csv", "-o", export_csv]
+        )
+        assert export_res_csv.exit_code == 0
+        assert os.path.exists(export_csv)
+
+        with open(export_csv, encoding="utf-8") as f:
+            lines = f.readlines()
+            assert "t,type,x,y,button,sdx,sdy,touch_id" in lines[0]
+            assert len(lines) > 1
+
+        # 4. Export to JSONL
+        export_jsonl = os.path.join(tmpdir, "exported.jsonl")
+        export_res_jsonl = runner.invoke(
+            app, ["export", session_file, "--to", "jsonl", "-o", export_jsonl]
+        )
+        assert export_res_jsonl.exit_code == 0
+        assert os.path.exists(export_jsonl)
+
+        with open(export_jsonl, encoding="utf-8") as f:
+            line_data = json.loads(f.readline())
+            assert "t" in line_data
+            assert "x" in line_data
+            assert "y" in line_data
+
+        # 5. Play back the session in mock backend
+        play_res = runner.invoke(
+            app,
+            [
+                "play",
+                session_file,
+                "--backend",
+                "mock",
+                "--speed",
+                "10",  # speed it up
+                "--delay",
+                "0",  # no delay countdown
+                "--no-spin",
+                "-q",
+            ],
+        )
+        assert play_res.exit_code == 0
+
+
+def test_record_rejects_unknown_capture_flag() -> None:
+    """An unrecognized --capture value should fail fast with a usage error, not a traceback."""
+    result = runner.invoke(
+        app,
+        ["record", "--backend", "mock", "--capture", "bogus", "--seconds", "0.1", "-q"],
+    )
+    assert result.exit_code == 2
+    assert "Unknown capture flag 'bogus'" in result.output
+
+
+def test_record_rejects_out_of_range_hz() -> None:
+    """A --hz value outside 1..65535 should produce a clean error, not raise internally."""
+    result = runner.invoke(
+        app,
+        ["record", "--backend", "mock", "--hz", "0", "--seconds", "0.1", "-q"],
+    )
+    assert result.exit_code == 1
+    assert "sample rate must be 1..65535" in result.output
+
+
+def test_record_default_level_is_valid_for_zlib_fallback() -> None:
+    """--level must default sensibly per resolved codec.
+
+    Regression test: the old flat default of 19 (calibrated for zstd's 1-22 range) was
+    passed straight into zlib.compressobj(), which only accepts 0-9, so plain
+    `cursortrack record` crashed with a raw ValueError whenever zstandard wasn't
+    installed - i.e. for anyone using the default (non-[zstd]) install.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        session_file = os.path.join(tmpdir, "session.ctrk")
+        result = runner.invoke(
+            app,
+            [
+                "record",
+                "-o",
+                session_file,
+                "--backend",
+                "mock",
+                "--codec",
+                "zlib",
+                "--seconds",
+                "0.1",
+                "--no-spin",
+                "-q",
+            ],
+        )
+        assert result.exit_code == 0
+        assert os.path.exists(session_file)
+
+
+def test_record_rejects_out_of_range_level_for_resolved_codec() -> None:
+    """An explicit --level outside the resolved codec's valid range should error cleanly."""
+    result = runner.invoke(
+        app,
+        [
+            "record",
+            "--backend",
+            "mock",
+            "--codec",
+            "zlib",
+            "--level",
+            "19",
+            "--seconds",
+            "0.1",
+            "-q",
+        ],
+    )
+    assert result.exit_code == 1
+    assert "--level must be 0..9 for the zlib codec" in result.output
+
+
+def test_record_completion_summary_states_actual_codec() -> None:
+    """The completion summary must name the codec actually used, not leave it implicit.
+
+    Relevant because --codec auto silently picks zlib vs zstd depending on what's
+    installed; the user should be able to see which one was used without a separate
+    `cursortrack info` call.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        session_file = os.path.join(tmpdir, "session.ctrk")
+        result = runner.invoke(
+            app,
+            [
+                "record",
+                "-o",
+                session_file,
+                "--backend",
+                "mock",
+                "--codec",
+                "zlib",
+                "--seconds",
+                "0.1",
+                "--no-spin",
+                "-q",
+            ],
+        )
+        assert result.exit_code == 0
+        assert "Codec:       zlib" in result.output
+
+
+def test_record_duration_limit_matches_hz_and_seconds() -> None:
+    """The recorded frame count should match round(hz * seconds), the documented contract."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        session_file = os.path.join(tmpdir, "duration.ctrk")
+        hz = 20
+        seconds = 0.5
+
+        result = runner.invoke(
+            app,
+            [
+                "record",
+                "-o",
+                session_file,
+                "--backend",
+                "mock",
+                "--capture",
+                "move",
+                "--hz",
+                str(hz),
+                "--seconds",
+                str(seconds),
+                "--codec",
+                "raw",
+                "--no-spin",
+                "-q",
+            ],
+        )
+        assert result.exit_code == 0
+
+        session = Session.load(session_file)
+        assert session.rate == hz
+        # +1 accounts for the synthetic frame-0 event every recording starts with.
+        assert len(session.events) == round(hz * seconds) + 1
+
+
+def test_play_failsafe_aborts_immediately_on_corner() -> None:
+    """If the physical cursor is already in a corner, playback should abort on the first tick."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        session_file = os.path.join(tmpdir, "session.ctrk")
+        record_res = runner.invoke(
+            app,
+            [
+                "record",
+                "-o",
+                session_file,
+                "--backend",
+                "mock",
+                "--hz",
+                "20",
+                "--seconds",
+                "0.5",
+                "--codec",
+                "raw",
+                "--no-spin",
+                "-q",
+            ],
+        )
+        assert record_res.exit_code == 0
+
+        CornerAbortBackend.trigger_after = 0
+        BACKEND_CLASSES["mock"] = CornerAbortBackend
+
+        play_res = runner.invoke(
+            app,
+            [
+                "play",
+                session_file,
+                "--backend",
+                "mock",
+                "--speed",
+                "50",
+                "--delay",
+                "0",
+                "--no-spin",
+            ],
+        )
+        assert play_res.exit_code == 0
+        assert "Fail-safe triggered" in play_res.output
+        # An aborted playback must not claim success.
+        assert "Playback complete" not in play_res.output
+
+
+def test_play_prints_completion_message_only_on_success() -> None:
+    """A playback that runs to completion should print the success message; loud mode."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        session_file = os.path.join(tmpdir, "session.ctrk")
+        record_res = runner.invoke(
+            app,
+            [
+                "record",
+                "-o",
+                session_file,
+                "--backend",
+                "mock",
+                "--hz",
+                "20",
+                "--seconds",
+                "0.2",
+                "--codec",
+                "raw",
+                "--no-spin",
+                "-q",
+            ],
+        )
+        assert record_res.exit_code == 0
+
+        play_res = runner.invoke(
+            app,
+            [
+                "play",
+                session_file,
+                "--backend",
+                "mock",
+                "--speed",
+                "50",
+                "--delay",
+                "0",
+                "--no-spin",
+            ],
+        )
+        assert play_res.exit_code == 0
+        assert "Playback complete" in play_res.output
+
+
+def test_play_loop_runs_multiple_passes_before_failsafe_stops_it() -> None:
+    """--loop should replay the session again after finishing, not just play it once."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        session_file = os.path.join(tmpdir, "session.ctrk")
+        record_res = runner.invoke(
+            app,
+            [
+                "record",
+                "-o",
+                session_file,
+                "--backend",
+                "mock",
+                "--hz",
+                "20",
+                "--seconds",
+                "0.2",
+                "--codec",
+                "raw",
+                "--no-spin",
+                "-q",
+            ],
+        )
+        assert record_res.exit_code == 0
+
+        events_per_pass = len(Session.load(session_file).events)
+        # Let one full pass complete normally, then force a corner abort early in the second pass.
+        CornerAbortBackend.trigger_after = events_per_pass + 1
+        BACKEND_CLASSES["mock"] = CornerAbortBackend
+
+        play_res = runner.invoke(
+            app,
+            [
+                "play",
+                session_file,
+                "--backend",
+                "mock",
+                "--speed",
+                "50",
+                "--delay",
+                "0",
+                "--loop",
+                "--no-spin",
+            ],
+        )
+        assert play_res.exit_code == 0
+        assert "Replaying loop..." in play_res.output
+        assert "Fail-safe triggered" in play_res.output
+        assert "Playback complete" not in play_res.output

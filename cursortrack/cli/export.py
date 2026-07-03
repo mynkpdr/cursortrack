@@ -1,0 +1,67 @@
+"""Export subcommand translating recordings to other analytical/ML formats."""
+
+from __future__ import annotations
+
+import os
+from typing import Optional
+
+import typer
+from rich.console import Console
+
+from cursortrack.core.session import Session
+from cursortrack.export import export_session
+
+app = typer.Typer(help="Convert cursortrack files into CSV, JSONL, NumPy, or Parquet.")
+console = Console()
+
+
+@app.command()
+def export(
+    file: str = typer.Argument(
+        ..., help="Path to the recording file to export (.ctrk, .npy, or .jsonl)."
+    ),
+    to: str = typer.Option(
+        "csv",
+        "--to",
+        "-t",
+        help="Target export format. Choices: csv, jsonl, npy, parquet.",
+    ),
+    out: Optional[str] = typer.Option(
+        None,
+        "--out",
+        "-o",
+        help="Optional destination path. Defaults to same directory as input file.",
+    ),
+) -> None:
+    """Translate compressed session recordings into developer/ML formats (CSV, JSONL, Npy, Parquet)."""
+    if not os.path.exists(file):
+        console.print(f"[bold red]Error:[/bold red] File not found: {file}")
+        raise typer.Exit(code=1)
+
+    fmt = to.lower()
+    valid_formats = {"csv", "jsonl", "npy", "parquet"}
+    if fmt not in valid_formats:
+        console.print(
+            f"[bold red]Error:[/bold red] Invalid target format '{to}'. "
+            f"Supported options: {', '.join(valid_formats)}"
+        )
+        raise typer.Exit(code=1)
+
+    # Determine destination file path
+    if out is None:
+        base, _ = os.path.splitext(file)
+        out_path = f"{base}.{fmt}"
+    else:
+        out_path = out
+
+    console.print(f"Decoding and exporting [cyan]{file}[/cyan] -> [green]{out_path}[/green]...")
+
+    try:
+        session = Session.load(file)
+        count = export_session(session, out_path, fmt)
+        console.print(
+            f"[bold green]✔ Export complete![/bold green] Wrote {count} events to {out_path}."
+        )
+    except Exception as e:
+        console.print(f"[bold red]Export failed:[/bold red] {e}")
+        raise typer.Exit(code=1)

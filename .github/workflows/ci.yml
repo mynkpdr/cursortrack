@@ -1,0 +1,123 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test-windows:
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13", "3.14"]
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python-version }}
+        cache: 'pip'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        python -m pip install .[dev,zstd,ml]
+
+    - name: Lint with Ruff
+      run: |
+        ruff check .
+
+    - name: Format check with Ruff
+      run: |
+        ruff format --check .
+
+    - name: Type check with mypy
+      run: |
+        mypy cursortrack
+
+    - name: Run tests with pytest
+      run: |
+        pytest
+
+  # Validates the OS-agnostic layers (core/, export/, CLI plumbing) on Linux using the
+  # mock backend, ahead of a real Linux InputBackend landing (see ROADMAP.md). This is
+  # not "Linux support" - the real WindowsBackend equivalent for Linux is still a stub -
+  # it just gives non-Windows contributors CI signal on the code they're most likely to
+  # touch (format/codec/events/session/export/CLI) without needing a Windows machine.
+  test-ubuntu-core:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+        cache: 'pip'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        python -m pip install .[dev,zstd,ml]
+
+    - name: Lint with Ruff
+      run: |
+        ruff check .
+
+    - name: Format check with Ruff
+      run: |
+        ruff format --check .
+
+    - name: Type check with mypy (Windows-only backend is checked for real on the Windows job)
+      run: |
+        mypy --follow-imports=silent \
+          cursortrack/__init__.py \
+          cursortrack/__main__.py \
+          cursortrack/core \
+          cursortrack/export \
+          cursortrack/cli \
+          cursortrack/backends/__init__.py \
+          cursortrack/backends/base.py \
+          cursortrack/backends/linux.py \
+          cursortrack/backends/macos.py
+
+    - name: Run tests with pytest
+      run: |
+        pytest
+
+  # Stub for future Linux support
+  # test-linux:
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #   - uses: actions/checkout@v4
+  #   - name: Set up Python
+  #     uses: actions/setup-python@v5
+  #     with:
+  #       python-version: "3.12"
+  #   - name: Install dependencies
+  #     run: |
+  #       python -m pip install --upgrade pip
+  #       python -m pip install .[dev,linux]
+  #   - name: Run tests
+  #     run: pytest
+
+  # Stub for future macOS support
+  # test-macos:
+  #   runs-on: macos-latest
+  #   steps:
+  #   - uses: actions/checkout@v4
+  #   - name: Set up Python
+  #     uses: actions/setup-python@v5
+  #     with:
+  #       python-version: "3.12"
+  #   - name: Install dependencies
+  #     run: |
+  #       python -m pip install --upgrade pip
+  #       python -m pip install .[dev,macos]
+  #   - name: Run tests
+  #     run: pytest
