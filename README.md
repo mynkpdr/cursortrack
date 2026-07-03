@@ -1,4 +1,4 @@
-# CursorTrack 🔴
+# CursorTrack
 
 [![CI Status](https://github.com/mynkpdr/cursortrack/actions/workflows/ci.yml/badge.svg)](https://github.com/mynkpdr/cursortrack/actions)
 [![License](https://img.shields.io/github/license/mynkpdr/cursortrack)](LICENSE)
@@ -12,7 +12,7 @@ v0.1 is targeted at a first-class, dependency-free experience on Windows (using 
 
 ## Features
 
-- **🔴 High-Fidelity Recording**: Sample cursor movements (up to 240+ Hz), mouse buttons (press/release), scrolls (vertical + horizontal), and touchpad gestures.
+- **🟢 High-Fidelity Recording**: Sample cursor movements (up to 240+ Hz), mouse buttons (press/release), scrolls (vertical + horizontal), and touchpad gestures.
 - **⚡ Dependency-Free Playback**: Emulate mouse coordinates and clicks natively on Windows via Win32 ctypes (zero packages required to replay or capture position).
 - **🔒 Playback Fail-Safe**: Instantly abort an active replay by moving your mouse manually into **any corner** of the screen or pressing the **Esc** key globally.
 - **📦 Crash-Safe Stream**: Buffers flush and `fsync` periodically to disk so that recordings are fully readable even if the script is abruptly killed.
