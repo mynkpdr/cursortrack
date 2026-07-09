@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2026-07-09
+
+A pure bug-fix release: twelve correctness and safety fixes across the codec, recorder, playback, CLI, and both OS backends. No file-format or breaking API changes; two behavior changes are called out below.
+
+### Fixed
+- **Codec: `write_uvarint` hung forever on negative input** (#4). It now raises `ValueError` immediately instead of appending continuation bytes unboundedly.
+- **Codec: a corrupt byte in a zlib body lost the entire recording** (#5). Tolerant decompression now salvages the longest decodable prefix via chunked recovery with a byte-by-byte replay around the failure point.
+- **Recorder: frame-clock drift** (#3). Click/scroll timestamps that rounded ahead of the sampling tick permanently stretched playback timing; frame bookkeeping now advances in lockstep with what is actually encoded.
+- **Side/extra mouse buttons were recorded and replayed as left clicks** (#2). Linux capture normalizes pynput's `button8`/`button9` to `x1`/`x2`, the recorder drops unknown buttons with a one-time warning, and the Windows backend emits real `MOUSEEVENTF_XDOWN`/`XUP` events. Unknown button names in `click()` are now a no-op on both backends.
+- **Linux: a dying X server terminated the whole process** (#6). Custom Xlib protocol/IO error handlers turn a lost connection into a catchable `RuntimeError`, and XTest availability is probed at startup with a clear error.
+- **`play --quiet` skipped the `--delay` safety countdown** (#11). The delay is always honored; only the countdown messages are silenced. Ctrl-C during the countdown now exits cleanly (code 130) without leaking the Esc listener.
+- **`export`/`record` silently overwrote existing files — including the export's own input** (#12). Both commands now refuse to overwrite unless `--force` is given, and exporting a file onto itself is always rejected.
+- **Aborted playback exited 0 like success** (#13). Fail-safe/Esc aborts exit 1; Ctrl-C exits 130. Successful playback still exits 0.
+- **Silent pynput hook failures** (#14). Both backends verify the mouse listener actually came up after `start()` and raise a clear error instead of recording nothing; listener teardown is best-effort and never masks the recording's result.
+- **Windows: `GetCursorPos` failures returned stale coordinates** (#15). Positions are read into a fresh buffer per call with the `BOOL` return checked (raising `OSError` on failure), and all user32 prototypes are declared.
+- **Windows: multi-monitor fail-safe was broken** (#16). Screen metrics now cover the full virtual desktop (`SM_*VIRTUALSCREEN`), a new `get_screen_bounds()` exposes the (possibly negative) origin, corner detection accounts for it, and DPI awareness upgrades to per-monitor-v2 with a legacy fallback.
+- **Silent truncation on decode** (#17). `Session.truncated` now reports when a file's event stream stopped early (truncated varint, unknown tag, partial recovery), and `info`/`play`/`export` print a warning for such files.
+
+### Changed (behavior)
+- Aborted `play` runs exit nonzero (1 for fail-safe/Esc, 130 for Ctrl-C) instead of 0.
+- `record -o` and `export` refuse to overwrite existing files without `--force`.
+
 ## [0.2.0] - 2026-07-09
 
 This release brings first-class Linux support: recording, playback, and capture now work on X11 sessions (and XWayland on Wayland desktops) with the same dependency-free design as the Windows backend.
