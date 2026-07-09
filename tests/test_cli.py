@@ -62,6 +62,52 @@ class CornerAbortBackend(InputBackend):
         pass
 
 
+class AheadOfTickClickBackend(InputBackend):
+    """Mock backend that injects clicks stamped far ahead of the sampling tick.
+
+    Emulates a recording loop that fell behind wall-clock time: the click
+    timestamps round to frame numbers well past the loop's tick counter,
+    which is the trigger for the historical frame-drift bug.
+    """
+
+    #: perf_counter offset applied to injected click timestamps (seconds).
+    FUTURE_SECONDS = 20.0
+    #: read_position() call numbers on which a click press+release is injected.
+    INJECT_ON_READS = (5, 15)
+
+    def __init__(self) -> None:
+        self.reads = 0
+        self.callback: Callable[[str, tuple[Any, ...], float], None] | None = None
+
+    def read_position(self) -> tuple[int, int]:
+        self.reads += 1
+        if self.callback is not None and self.reads in self.INJECT_ON_READS:
+            t_ahead = time.perf_counter() + self.FUTURE_SECONDS
+            self.callback("click", (500, 500, "left", True), t_ahead)
+            self.callback("click", (500, 500, "left", False), t_ahead)
+        return (500, 500)
+
+    def set_position(self, x: int, y: int) -> None:
+        pass
+
+    def get_screen_size(self) -> tuple[int, int]:
+        return (1920, 1080)
+
+    def click(self, button: str, pressed: bool) -> None:
+        pass
+
+    def scroll(self, sdx: int, sdy: int) -> None:
+        pass
+
+    def start_listening(
+        self, on_event: Callable[[str, tuple[Any, ...], float], None], _capture_mask: int
+    ) -> None:
+        self.callback = on_event
+
+    def stop_listening(self) -> None:
+        self.callback = None
+
+
 class MixedButtonClickBackend(InputBackend):
     """Mock backend that injects one x2 click pair and one unsupported-button pair."""
 
@@ -335,6 +381,60 @@ def test_record_duration_limit_matches_hz_and_seconds() -> None:
         assert session.rate == hz
         # +1 accounts for the synthetic frame-0 event every recording starts with.
         assert len(session.events) == round(hz * seconds) + 1
+
+
+def test_record_frame_clock_does_not_compound_drift_on_ahead_events() -> None:
+    """Click timestamps rounding past the move tick must not stretch the timeline.
+
+    Regression test: the recorder stamped moves with its tick counter but
+    clicks with wall-clock frames. When a click's frame landed ahead of the
+    tick, the next move rewound the bookkeeping below what had actually been
+    encoded, so every later ahead-of-tick event re-encoded the same wall-clock
+    gap on top of the decoder's already-advanced frame counter. Two clicks
+    injected 20s ahead thus pushed the final frame to ~2x the offset instead
+    of ~1x, permanently stretching playback timing.
+    """
+    hz = 50
+    future_frames = round(AheadOfTickClickBackend.FUTURE_SECONDS * hz)  # 1000
+
+    BACKEND_CLASSES["mock"] = AheadOfTickClickBackend
+    with tempfile.TemporaryDirectory() as tmpdir:
+        session_file = os.path.join(tmpdir, "drift.ctrk")
+        result = runner.invoke(
+            app,
+            [
+                "record",
+                "-o",
+                session_file,
+                "--backend",
+                "mock",
+                "--capture",
+                "move,click",
+                "--hz",
+                str(hz),
+                "--seconds",
+                "0.5",
+                "--codec",
+                "raw",
+                "--no-spin",
+                "-q",
+                "-d",
+                "0",
+            ],
+        )
+        assert result.exit_code == 0
+
+        session = Session.load(session_file)
+        clicks = [e for e in session.events if isinstance(e, ButtonEvent)]
+        assert len(clicks) == 4  # two injected press+release pairs
+
+        final_frame = session.events[-1].frame
+        # Sanity: the injected clicks really did land on the future timeline.
+        assert final_frame >= future_frames
+        # With consistent bookkeeping the timeline absorbs the 20s offset once
+        # (~1000 frames + the recorded ticks). The old bug re-added it per
+        # click burst, landing near 2x. Generous margin for CI loop jitter.
+        assert final_frame < round(1.5 * future_frames)
 
 
 def test_record_preserves_side_buttons_and_drops_unknown_ones() -> None:

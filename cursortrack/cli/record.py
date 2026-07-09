@@ -415,12 +415,16 @@ def record(
                 cur = prev_pos
 
             if capture & CAP_MOVE:
-                dframes = frame + 1 - last_event_frame
+                # last_event_frame can sit ahead of the tick counter when a
+                # listener event's wall-clock frame rounded past it. Advance by
+                # exactly what we encode - never rewind - so the bookkeeping
+                # stays in lockstep with the decoder's accumulated frame count.
+                dframes = max(1, frame + 1 - last_event_frame)
                 dx = cur[0] - prev_pos[0]
                 dy = cur[1] - prev_pos[1]
-                encode_move(buf, max(1, dframes), dx, dy)
+                encode_move(buf, dframes, dx, dy)
                 event_counts["move"] += 1
-                last_event_frame = frame + 1
+                last_event_frame += dframes
 
             prev_pos = cur
             frame += 1
