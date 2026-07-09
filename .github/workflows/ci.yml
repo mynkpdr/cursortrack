@@ -35,12 +35,13 @@ jobs:
       run: |
         ruff format --check .
 
-    # linux.py is excluded here: mypy narrows sys.platform to "win32" on Windows,
-    # marking everything past the LinuxBackend platform guard as unreachable. The
-    # Linux job type checks it for real (and symmetrically excludes windows.py).
-    - name: Type check with mypy (Linux-only backend is checked for real on the Linux job)
+    # linux.py and macos.py are excluded here: mypy narrows sys.platform to
+    # "win32" on Windows, marking everything past each platform guard as
+    # unreachable. The Linux and macOS jobs type check them for real (and
+    # symmetrically exclude windows.py).
+    - name: Type check with mypy (Linux/macOS-only backends are checked for real on their own jobs)
       run: |
-        mypy --follow-imports=silent cursortrack/__init__.py cursortrack/__main__.py cursortrack/core cursortrack/export cursortrack/cli cursortrack/backends/__init__.py cursortrack/backends/base.py cursortrack/backends/windows.py cursortrack/backends/macos.py
+        mypy --follow-imports=silent cursortrack/__init__.py cursortrack/__main__.py cursortrack/core cursortrack/export cursortrack/cli cursortrack/backends/__init__.py cursortrack/backends/base.py cursortrack/backends/windows.py
 
     - name: Run tests with pytest
       run: |
@@ -81,7 +82,10 @@ jobs:
       run: |
         ruff format --check .
 
-    - name: Type check with mypy (Windows-only backend is checked for real on the Windows job)
+    # windows.py and macos.py are excluded here: mypy narrows sys.platform to
+    # "linux" on this runner, marking everything past each platform guard as
+    # unreachable. The Windows and macOS jobs type check them for real.
+    - name: Type check with mypy (Windows/macOS-only backends are checked for real on their own jobs)
       run: |
         mypy --follow-imports=silent \
           cursortrack/__init__.py \
@@ -91,25 +95,62 @@ jobs:
           cursortrack/cli \
           cursortrack/backends/__init__.py \
           cursortrack/backends/base.py \
-          cursortrack/backends/linux.py \
-          cursortrack/backends/macos.py
+          cursortrack/backends/linux.py
 
     - name: Run tests with pytest under Xvfb
       run: |
         xvfb-run -a pytest
 
-  # Stub for future macOS support
-  # test-macos:
-  #   runs-on: macos-latest
-  #   steps:
-  #   - uses: actions/checkout@v4
-  #   - name: Set up Python
-  #     uses: actions/setup-python@v5
-  #     with:
-  #       python-version: "3.12"
-  #   - name: Install dependencies
-  #     run: |
-  #       python -m pip install --upgrade pip
-  #       python -m pip install .[dev,macos]
-  #   - name: Run tests
-  #     run: pytest
+  # Real-backend tests exercise import/init/read_position/get_screen_size for
+  # real; anything needing CGEventPost delivery or a pynput hook to actually
+  # fire (Accessibility-gated) skips itself, since GitHub's macOS runners
+  # cannot grant that permission (see test_macos_backend.py). Python matrix is
+  # deliberately small: macOS runners bill at 10x on private repos - this repo
+  # is public so it's free, but there's still no reason to burn extra minutes
+  # once 3.9 (the floor) and 3.13 (a recent release) both pass.
+  test-macos:
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        python-version: ["3.9", "3.13"]
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python-version }}
+        cache: 'pip'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        python -m pip install .[dev,zstd,ml,macos]
+
+    - name: Lint with Ruff
+      run: |
+        ruff check .
+
+    - name: Format check with Ruff
+      run: |
+        ruff format --check .
+
+    # linux.py and windows.py are excluded here: mypy narrows sys.platform to
+    # "darwin" on this runner, marking everything past each platform guard as
+    # unreachable (mirrors the exclusions the Windows and Linux jobs apply).
+    - name: Type check with mypy (Linux/Windows-only backends are checked for real on their own jobs)
+      run: |
+        mypy --follow-imports=silent \
+          cursortrack/__init__.py \
+          cursortrack/__main__.py \
+          cursortrack/core \
+          cursortrack/export \
+          cursortrack/cli \
+          cursortrack/backends/__init__.py \
+          cursortrack/backends/base.py \
+          cursortrack/backends/macos.py
+
+    - name: Run tests with pytest
+      run: |
+        pytest
