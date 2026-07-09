@@ -54,12 +54,71 @@ def test_set_and_read_position_round_trip() -> None:
 
 
 @requires_x11
-def test_unknown_button_falls_back_to_left_click() -> None:
-    """Parity with WindowsBackend: unrecognized button names emulate a left click."""
-    backend = get_backend("linux")
-    # Must not raise; delivery is verified by the capture round-trip test below.
-    backend.click("nonexistent-button", True)
-    backend.click("nonexistent-button", False)
+def test_unknown_button_is_a_noop() -> None:
+    """Unrecognized button names must do nothing.
+
+    Regression test: the old fallback substituted a *left* click, silently
+    performing a real (potentially destructive) action the user never
+    recorded. Delivery of valid buttons is verified by the round-trip tests.
+    """
+    pytest.importorskip("pynput")
+    from cursortrack.core.events import CAP_CLICK
+
+    captured: list[tuple[str, tuple[object, ...]]] = []
+
+    def on_event(kind: str, payload: tuple[object, ...], _t: float) -> None:
+        captured.append((kind, payload))
+
+    recorder = get_backend("linux")
+    recorder.start_listening(on_event, CAP_CLICK)
+    try:
+        time.sleep(0.5)  # let the listener thread attach its hook
+        player = get_backend("linux")
+        player.click("nonexistent-button", True)
+        player.click("nonexistent-button", False)
+        time.sleep(1.0)  # window in which a wrongly-substituted click would arrive
+    finally:
+        recorder.stop_listening()
+
+    assert captured == [], f"unknown button emitted real events: {captured}"
+
+
+@requires_x11
+def test_side_buttons_round_trip_with_canonical_names() -> None:
+    """XTest-injected x1/x2 clicks must be captured under their canonical names.
+
+    Regression test: pynput's X11 listener reports side buttons as
+    "button8"/"button9", which the recorder used to store as *left* clicks.
+    The backend now normalizes them to the format's "x1"/"x2" vocabulary.
+    """
+    pytest.importorskip("pynput")
+    from cursortrack.core.events import CAP_CLICK
+
+    captured: list[tuple[str, tuple[object, ...]]] = []
+
+    def on_event(kind: str, payload: tuple[object, ...], _t: float) -> None:
+        captured.append((kind, payload))
+
+    recorder = get_backend("linux")
+    recorder.start_listening(on_event, CAP_CLICK)
+    try:
+        time.sleep(0.5)  # let the listener thread attach its hook
+
+        player = get_backend("linux")
+        for name in ("x1", "x2"):
+            player.click(name, True)
+            player.click(name, False)
+
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            if len([p for k, p in captured if k == "click"]) >= 4:
+                break
+            time.sleep(0.1)
+    finally:
+        recorder.stop_listening()
+
+    names = [p[2] for k, p in captured if k == "click"]
+    assert names == ["x1", "x1", "x2", "x2"], f"captured button names: {names}"
 
 
 @requires_x11

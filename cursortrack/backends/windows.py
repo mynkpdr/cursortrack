@@ -16,8 +16,14 @@ MOUSEEVENTF_RIGHTDOWN = 0x0008
 MOUSEEVENTF_RIGHTUP = 0x0010
 MOUSEEVENTF_MIDDLEDOWN = 0x0020
 MOUSEEVENTF_MIDDLEUP = 0x0040
+MOUSEEVENTF_XDOWN = 0x0080
+MOUSEEVENTF_XUP = 0x0100
 MOUSEEVENTF_WHEEL = 0x0800
 MOUSEEVENTF_HWHEEL = 0x1000
+
+# dwData values selecting which extended button MOUSEEVENTF_XDOWN/XUP refers to
+XBUTTON1 = 0x0001
+XBUTTON2 = 0x0002
 
 WHEEL_DELTA = 120
 
@@ -57,19 +63,27 @@ class WindowsBackend(InputBackend):
 
     def click(self, button: str, pressed: bool) -> None:
         btn = button.lower()
-        flags = 0
+        data = 0
         if btn == "left":
             flags = MOUSEEVENTF_LEFTDOWN if pressed else MOUSEEVENTF_LEFTUP
         elif btn == "right":
             flags = MOUSEEVENTF_RIGHTDOWN if pressed else MOUSEEVENTF_RIGHTUP
         elif btn == "middle":
             flags = MOUSEEVENTF_MIDDLEDOWN if pressed else MOUSEEVENTF_MIDDLEUP
+        elif btn == "x1":
+            flags = MOUSEEVENTF_XDOWN if pressed else MOUSEEVENTF_XUP
+            data = XBUTTON1
+        elif btn == "x2":
+            flags = MOUSEEVENTF_XDOWN if pressed else MOUSEEVENTF_XUP
+            data = XBUTTON2
         else:
-            # Fallback to left click if unrecognized side buttons are passed
-            flags = MOUSEEVENTF_LEFTDOWN if pressed else MOUSEEVENTF_LEFTUP
+            # Unknown button names are a no-op: substituting a left click (the
+            # old fallback) performs a real, potentially destructive action the
+            # user never recorded.
+            return
 
         # Emulate click at current cursor position
-        self._user32.mouse_event(flags, 0, 0, 0, 0)
+        self._user32.mouse_event(flags, 0, 0, data, 0)
 
     def scroll(self, sdx: int, sdy: int) -> None:
         # vertical scroll

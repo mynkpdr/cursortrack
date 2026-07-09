@@ -30,6 +30,14 @@ BUTTON_MAP: dict[str, int] = {
     "x2": BUTTON_X2,
 }
 
+# pynput's X11 listener reports side buttons by raw number ("button8"/"button9");
+# the canonical "x1"/"x2" names in the session format only exist on Windows.
+# Normalize here so recordings stay platform-portable.
+PYNPUT_BUTTON_ALIASES: dict[str, str] = {
+    "button8": "x1",
+    "button9": "x2",
+}
+
 # X11 CurrentTime constant (0 = "now" for XTest event injection)
 CURRENT_TIME = 0
 
@@ -191,9 +199,12 @@ class LinuxBackend(InputBackend):
         return int(width), int(height)
 
     def click(self, button: str, pressed: bool) -> None:
-        # Fall back to left click if unrecognized button names are passed (parity
-        # with the Windows backend's behavior).
-        x_button = BUTTON_MAP.get(button.lower(), BUTTON_LEFT)
+        # Unknown button names are a no-op: substituting a left click (the old
+        # fallback) performs a real, potentially destructive action the user
+        # never recorded.
+        x_button = BUTTON_MAP.get(button.lower())
+        if x_button is None:
+            return
         self._xtst.XTestFakeButtonEvent(self._display, x_button, int(pressed), CURRENT_TIME)
         self._sync()
 
@@ -239,7 +250,8 @@ class LinuxBackend(InputBackend):
 
         def _on_click(x: float, y: float, button: Any, pressed: bool) -> None:
             if want_click:
-                on_event("click", (int(x), int(y), button.name, pressed), time.perf_counter())
+                name = PYNPUT_BUTTON_ALIASES.get(button.name, button.name)
+                on_event("click", (int(x), int(y), name, pressed), time.perf_counter())
 
         def _on_scroll(x: float, y: float, sdx: float, sdy: float) -> None:
             if want_scroll:

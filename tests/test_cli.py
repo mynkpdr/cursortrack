@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import time
 from typing import Any, Callable
 
 from typer.testing import CliRunner
@@ -12,6 +13,7 @@ from typer.testing import CliRunner
 from cursortrack.backends import BACKEND_CLASSES
 from cursortrack.backends.base import InputBackend
 from cursortrack.cli.app import app
+from cursortrack.core.events import ButtonEvent
 from cursortrack.core.session import Session
 
 runner = CliRunner()
@@ -58,6 +60,44 @@ class CornerAbortBackend(InputBackend):
 
     def stop_listening(self) -> None:
         pass
+
+
+class MixedButtonClickBackend(InputBackend):
+    """Mock backend that injects one x2 click pair and one unsupported-button pair."""
+
+    def __init__(self) -> None:
+        self.reads = 0
+        self.callback: Callable[[str, tuple[Any, ...], float], None] | None = None
+
+    def read_position(self) -> tuple[int, int]:
+        self.reads += 1
+        if self.callback is not None and self.reads == 3:
+            now = time.perf_counter()
+            self.callback("click", (500, 500, "x2", True), now)
+            self.callback("click", (500, 500, "x2", False), now)
+            self.callback("click", (500, 500, "button10", True), now)
+            self.callback("click", (500, 500, "button10", False), now)
+        return (500, 500)
+
+    def set_position(self, x: int, y: int) -> None:
+        pass
+
+    def get_screen_size(self) -> tuple[int, int]:
+        return (1920, 1080)
+
+    def click(self, button: str, pressed: bool) -> None:
+        pass
+
+    def scroll(self, sdx: int, sdy: int) -> None:
+        pass
+
+    def start_listening(
+        self, on_event: Callable[[str, tuple[Any, ...], float], None], _capture_mask: int
+    ) -> None:
+        self.callback = on_event
+
+    def stop_listening(self) -> None:
+        self.callback = None
 
 
 def test_cli_version() -> None:
@@ -295,6 +335,46 @@ def test_record_duration_limit_matches_hz_and_seconds() -> None:
         assert session.rate == hz
         # +1 accounts for the synthetic frame-0 event every recording starts with.
         assert len(session.events) == round(hz * seconds) + 1
+
+
+def test_record_preserves_side_buttons_and_drops_unknown_ones() -> None:
+    """x1/x2 must be stored under their own ids; unsupported buttons must be dropped.
+
+    Regression test: any button name outside the format's vocabulary was mapped
+    to id 0 - i.e. recorded as a *left* click - so replay performed left clicks
+    the user never made. On Linux this bit every side-button press (pynput
+    reports them as "button8"/"button9" before backend normalization).
+    """
+    BACKEND_CLASSES["mock"] = MixedButtonClickBackend
+    with tempfile.TemporaryDirectory() as tmpdir:
+        session_file = os.path.join(tmpdir, "buttons.ctrk")
+        result = runner.invoke(
+            app,
+            [
+                "record",
+                "-o",
+                session_file,
+                "--backend",
+                "mock",
+                "--capture",
+                "move,click",
+                "--hz",
+                "50",
+                "--seconds",
+                "0.3",
+                "--codec",
+                "raw",
+                "--no-spin",
+                "-q",
+                "-d",
+                "0",
+            ],
+        )
+        assert result.exit_code == 0
+        assert "unsupported button 'button10'" in result.output
+
+        clicks = [e for e in Session.load(session_file).events if isinstance(e, ButtonEvent)]
+        assert [(c.button, c.pressed) for c in clicks] == [("x2", True), ("x2", False)]
 
 
 def test_play_failsafe_aborts_immediately_on_corner() -> None:
