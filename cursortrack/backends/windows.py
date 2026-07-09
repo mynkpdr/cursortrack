@@ -27,9 +27,45 @@ XBUTTON2 = 0x0002
 
 WHEEL_DELTA = 120
 
+# GetSystemMetrics indices for the virtual desktop (the bounding box of *all*
+# monitors). Indices 0/1 (SM_CXSCREEN/SM_CYSCREEN) only cover the primary
+# monitor, which breaks bounds/fail-safe checks as soon as a secondary
+# monitor extends the desktop beyond it.
+SM_XVIRTUALSCREEN = 76
+SM_YVIRTUALSCREEN = 77
+SM_CXVIRTUALSCREEN = 78
+SM_CYVIRTUALSCREEN = 79
+
+# DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, passed to
+# SetProcessDpiAwarenessContext (Windows 10 1703+). Per-monitor-v2 awareness
+# reports true physical pixels on every monitor regardless of its DPI scale;
+# the legacy SetProcessDPIAware() fallback below only does so for whichever
+# monitor was active at process startup.
+DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = ctypes.c_void_p(-4)
+
 
 class POINT(ctypes.Structure):
     _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+
+def _enable_dpi_awareness(user32: Any) -> None:
+    """Request per-monitor DPI awareness, falling back for older Windows.
+
+    SetProcessDpiAwarenessContext requires Windows 10 1703+ and correctly
+    reports physical pixels on every monitor. On older releases (or if the
+    call is otherwise rejected) fall back to the legacy, primary-monitor-only
+    SetProcessDPIAware(), which is still strictly better than leaving DPI
+    virtualization on and getting scaled coordinates.
+    """
+    try:
+        if user32.SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2):
+            return
+    except (AttributeError, OSError):
+        pass
+    try:
+        user32.SetProcessDPIAware()
+    except Exception:
+        pass
 
 
 class WindowsBackend(InputBackend):
@@ -39,13 +75,9 @@ class WindowsBackend(InputBackend):
         if not sys.platform.startswith("win"):
             raise RuntimeError("WindowsBackend can only be initialized on Windows systems.")
 
-        try:
-            # Enable DPI Awareness so we retrieve physical pixel positions instead of scaled coordinates
-            ctypes.windll.user32.SetProcessDPIAware()
-        except Exception:
-            pass
-
         self._user32 = ctypes.windll.user32
+        _enable_dpi_awareness(self._user32)
+
         self._point = POINT()
         self._listener: Any | None = None
 
@@ -57,9 +89,15 @@ class WindowsBackend(InputBackend):
         self._user32.SetCursorPos(int(x), int(y))
 
     def get_screen_size(self) -> tuple[int, int]:
-        width = self._user32.GetSystemMetrics(0)
-        height = self._user32.GetSystemMetrics(1)
+        width = self._user32.GetSystemMetrics(SM_CXVIRTUALSCREEN)
+        height = self._user32.GetSystemMetrics(SM_CYVIRTUALSCREEN)
         return int(width), int(height)
+
+    def get_screen_bounds(self) -> tuple[int, int, int, int]:
+        origin_x = self._user32.GetSystemMetrics(SM_XVIRTUALSCREEN)
+        origin_y = self._user32.GetSystemMetrics(SM_YVIRTUALSCREEN)
+        width, height = self.get_screen_size()
+        return int(origin_x), int(origin_y), width, height
 
     def click(self, button: str, pressed: bool) -> None:
         btn = button.lower()

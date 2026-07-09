@@ -21,6 +21,26 @@ app = typer.Typer(
 console = Console()
 
 
+def _is_in_corner(x: int, y: int, ox: int, oy: int, w: int, h: int) -> bool:
+    """Check if (x, y) is within the fail-safe tolerance of a screen-bounds corner.
+
+    Args:
+        x: X coordinate to test.
+        y: Y coordinate to test.
+        ox: Virtual screen origin X (can be negative on multi-monitor setups
+            where a secondary monitor sits left of the primary one).
+        oy: Virtual screen origin Y (can be negative if a monitor sits above
+            the primary one).
+        w: Virtual screen width.
+        h: Virtual screen height.
+    """
+    near_left = x <= ox + 5
+    near_right = x >= ox + w - 6
+    near_top = y <= oy + 5
+    near_bottom = y >= oy + h - 6
+    return (near_left or near_right) and (near_top or near_bottom)
+
+
 def precise_wait(
     target: float, perf: Callable[[], float], spin: bool, spin_threshold: float = 0.0012
 ) -> None:
@@ -84,8 +104,9 @@ def play(
         console.print(f"[bold red]Error initializing backend:[/bold red] {e}")
         raise typer.Exit(code=1)
 
-    # Detect screen sizes
-    scr_w, scr_h = backend.get_screen_size()
+    # Detect virtual screen bounds (origin can be negative on multi-monitor
+    # setups where a secondary monitor sits left of or above the primary one)
+    scr_ox, scr_oy, scr_w, scr_h = backend.get_screen_bounds()
 
     abort_keyboard = False
     kb_listener: Any = None
@@ -166,19 +187,11 @@ def play(
                 # Check fail-safe: did user force mouse to a corner?
                 try:
                     rx, ry = backend.read_position()
-                    is_in_corner = (
-                        (rx <= 5 and ry <= 5)
-                        or (rx >= scr_w - 6 and ry <= 5)
-                        or (rx <= 5 and ry >= scr_h - 6)
-                        or (rx >= scr_w - 6 and ry >= scr_h - 6)
-                    )
+                    is_in_corner = _is_in_corner(rx, ry, scr_ox, scr_oy, scr_w, scr_h)
                     last_expected_in_corner = False
                     if last_expected_x is not None and last_expected_y is not None:
-                        last_expected_in_corner = (
-                            (last_expected_x <= 5 and last_expected_y <= 5)
-                            or (last_expected_x >= scr_w - 6 and last_expected_y <= 5)
-                            or (last_expected_x <= 5 and last_expected_y >= scr_h - 6)
-                            or (last_expected_x >= scr_w - 6 and last_expected_y >= scr_h - 6)
+                        last_expected_in_corner = _is_in_corner(
+                            last_expected_x, last_expected_y, scr_ox, scr_oy, scr_w, scr_h
                         )
                     if is_in_corner and not last_expected_in_corner:
                         console.print(
