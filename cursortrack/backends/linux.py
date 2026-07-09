@@ -441,8 +441,12 @@ class LinuxBackend(InputBackend):
             raise
 
     def stop_listening(self) -> None:
+        # pynput's X11 listener can raise from stop()/join() during Xlib
+        # teardown races (e.g. AttributeError on a half-torn-down Listener);
+        # detecting a failed *start* is the point of #14, stop must be best-effort.
         if self._listener is not None:
-            self._listener.stop()
+            with contextlib.suppress(Exception):
+                self._listener.stop()
             with contextlib.suppress(Exception):
                 self._listener.join(timeout=2.0)
             self._listener = None

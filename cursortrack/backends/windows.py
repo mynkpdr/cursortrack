@@ -143,8 +143,12 @@ class WindowsBackend(InputBackend):
             raise
 
     def stop_listening(self) -> None:
+        # Mirror the Linux backend: pynput's stop()/join() can raise during
+        # listener teardown races, and detecting a failed *start* is the point
+        # of #14, so stop must be best-effort rather than propagating errors.
         if self._listener is not None:
-            self._listener.stop()
+            with contextlib.suppress(Exception):
+                self._listener.stop()
             with contextlib.suppress(Exception):
                 self._listener.join(timeout=2.0)
             self._listener = None
