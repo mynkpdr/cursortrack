@@ -168,6 +168,88 @@ def test_injected_clicks_and_scrolls_are_captured_by_hooks() -> None:
 
 
 @requires_x11
+def test_missing_xtest_or_dead_connection_guard_attributes() -> None:
+    """The backend must probe XTest and know whether it can survive connection loss."""
+    backend = get_backend("linux")
+    # Construction succeeded, so the XTest probe passed on this server (Xvfb
+    # and all real servers ship it). The survival flag must be a bool either way.
+    assert isinstance(backend._survives_io_error, bool)
+
+
+@requires_x11
+def test_lost_x_connection_raises_instead_of_exiting_process() -> None:
+    """A dying X server must surface as a Python exception, not a process exit.
+
+    Regression test: without custom Xlib error handlers, libX11's defaults call
+    exit() when the connection drops (session logout, SSH forwarding gone,
+    Xvfb killed), terminating Python before the recorder can finalize its
+    partially written session file. This spawns a disposable Xvfb, connects a
+    backend to it, kills the server, and verifies the failure is catchable.
+    """
+    import shutil
+    import subprocess
+
+    from cursortrack.backends.linux import LinuxBackend
+
+    xvfb = shutil.which("Xvfb")
+    if xvfb is None:
+        pytest.skip("Xvfb binary not available to spawn a disposable X server.")
+
+    # Allocate a display by probing candidates, using a successful backend
+    # connection as the readiness signal. (Socket-file checks and -displayfd
+    # are unreliable where /tmp/.X11-unix isn't writable, e.g. WSL - Xvfb
+    # then serves only the abstract socket and never creates the file.)
+    proc = None
+    backend = None
+    old_display = os.environ["DISPLAY"]
+    for candidate in (91, 92, 93):
+        attempt = subprocess.Popen(
+            [xvfb, f":{candidate}", "-screen", "0", "320x240x24"],
+            stderr=subprocess.DEVNULL,
+        )
+        os.environ["DISPLAY"] = f":{candidate}"
+        try:
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline and attempt.poll() is None:
+                try:
+                    backend = LinuxBackend()
+                    break
+                except RuntimeError:
+                    time.sleep(0.1)
+        finally:
+            os.environ["DISPLAY"] = old_display
+        # Only accept the connection if it is to *our* live server (a dead
+        # `attempt` here means the display number was already taken).
+        if backend is not None and attempt.poll() is None:
+            proc = attempt
+            break
+        backend = None
+        attempt.kill()
+        attempt.wait(timeout=10)
+    if proc is None or backend is None:
+        pytest.skip("Could not start a disposable Xvfb on any candidate display.")
+
+    try:
+        if not backend._survives_io_error:
+            pytest.skip("libX11 lacks XSetIOErrorExitHandler; connection loss still exits.")
+
+        backend.read_position()  # sanity: the connection works while alive
+
+        proc.terminate()
+        proc.wait(timeout=10)
+
+        with pytest.raises(RuntimeError, match="connection has been lost"):
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                backend.read_position()
+                time.sleep(0.05)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=10)
+
+
+@requires_x11
 def test_cli_record_and_play_on_real_linux_backend() -> None:
     """End-to-end CLI lifecycle on the real linux backend (not the mock)."""
     # Park the cursor away from screen corners so the playback fail-safe
