@@ -167,11 +167,39 @@ def decompress_tolerant(blob: bytes, codec: int) -> bytes:
     if codec == CODEC_ZLIB:
         d = zlib.decompressobj()
         try:
+            # Fast path: intact or merely truncated streams decode in one call
+            # (truncation does not raise; it just ends the output early).
             return d.decompress(blob)
         except zlib.error:
-            # Return whatever was produced before the error (unfinalized streams)
-            try:
-                return d.decompress(blob, 0)
-            except Exception:
-                return b""
+            pass
+        return _recover_corrupt_zlib(blob)
     raise ValueError(f"Unknown codec ID {codec}")
+
+
+def _recover_corrupt_zlib(blob: bytes) -> bytes:
+    """Salvage the longest decodable prefix of a mid-stream-corrupted zlib body.
+
+    zlib discards *all* output produced by the decompress() call that raises,
+    so recovery granularity at the failure point decides how much survives.
+    A coarse chunked pass locates the failing region cheaply, then a replay
+    pass advances byte-by-byte inside it.
+    """
+    step = 1 << 12
+    d = zlib.decompressobj()
+    fail_at = 0
+    while fail_at < len(blob):
+        try:
+            d.decompress(blob[fail_at : fail_at + step])
+        except zlib.error:
+            break
+        fail_at += step
+
+    d = zlib.decompressobj()
+    out = bytearray()
+    try:
+        out += d.decompress(blob[:fail_at])
+        for i in range(fail_at, min(fail_at + step, len(blob))):
+            out += d.decompress(blob[i : i + 1])
+    except zlib.error:
+        pass
+    return bytes(out)

@@ -111,3 +111,27 @@ def test_decompress_unfinalized_zlib() -> None:
     decompressed = decompress_tolerant(blob, CODEC_ZLIB)
     assert decompressed == b"chunk1"
     writer.close()
+
+
+def test_decompress_corrupt_zlib_tail_recovers_prefix() -> None:
+    """A corrupt byte near the end must not wipe the data decoded before it.
+
+    Regression test: a single decompress(blob) call that raises discards all
+    of its output, so one flipped byte in the tail lost the entire recording
+    despite every earlier flush boundary being intact.
+    """
+    f = io.BytesIO()
+    writer = CodecWriter(f, CODEC_ZLIB, level=6)
+    payload = b"X" * 100_000  # large enough to span many recovery chunks
+    writer.write(payload)
+    writer.flush()  # Z_SYNC_FLUSH boundary, as the recorder emits every second
+    writer.write(b"tail-data-after-flush")
+    writer.close()
+
+    blob = bytearray(f.getvalue())
+    blob[-3] ^= 0xFF  # corrupt a byte near the end (past the flush boundary)
+
+    recovered = decompress_tolerant(bytes(blob), CODEC_ZLIB)
+    # Everything up to the last flush boundary must survive.
+    assert len(recovered) >= len(payload)
+    assert recovered[: len(payload)] == payload
