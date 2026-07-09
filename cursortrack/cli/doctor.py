@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import os
 import sys
 
 import typer
@@ -32,8 +33,17 @@ def main() -> None:
     os_name = sys.platform
     python_ver = sys.version.split()[0]
 
-    os_status = "[green]Supported (Windows)[/green]"
-    if not os_name.startswith("win"):
+    if os_name.startswith("win"):
+        os_status = "[green]Supported (Windows)[/green]"
+    elif os_name.startswith("linux"):
+        if os.environ.get("DISPLAY"):
+            os_status = "[green]Supported (Linux, X11 display detected)[/green]"
+        else:
+            os_status = (
+                "[yellow]Supported (Linux), but no X11 display detected — "
+                "set DISPLAY or run under xvfb-run[/yellow]"
+            )
+    else:
         os_status = f"[yellow]Partial Support ({os_name})[/yellow]"
 
     # 2. Build Diagnosis Table
@@ -43,7 +53,7 @@ def main() -> None:
     table.add_column("Current State", style="white")
 
     table.add_row("Python Version", ">= 3.9", f"[green]{python_ver}[/green]")
-    table.add_row("Operating System", "Windows (v0.1)", os_status)
+    table.add_row("Operating System", "Windows / Linux (v0.2)", os_status)
 
     # Core Dependencies
     table.add_row("typer", "Required (CLI)", "[green]Available[/green]")
@@ -68,7 +78,10 @@ def main() -> None:
     # 3. Actions / Troubleshooting Suggestions
     suggestions: dict[str, str] = {}
     if not pynput_ok:
-        suggestions["pynput"] = "pip install cursortrack[windows] (needed for click/scroll capture)"
+        extra = "linux" if os_name.startswith("linux") else "windows"
+        suggestions["pynput"] = (
+            f"pip install cursortrack[{extra}] (needed for click/scroll capture)"
+        )
 
     if suggestions:
         console.print("[bold yellow]Suggestions for complete features:[/bold yellow]")

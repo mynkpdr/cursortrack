@@ -35,30 +35,38 @@ jobs:
       run: |
         ruff format --check .
 
-    - name: Type check with mypy
+    # linux.py is excluded here: mypy narrows sys.platform to "win32" on Windows,
+    # marking everything past the LinuxBackend platform guard as unreachable. The
+    # Linux job type checks it for real (and symmetrically excludes windows.py).
+    - name: Type check with mypy (Linux-only backend is checked for real on the Linux job)
       run: |
-        mypy cursortrack
+        mypy --follow-imports=silent cursortrack/__init__.py cursortrack/__main__.py cursortrack/core cursortrack/export cursortrack/cli cursortrack/backends/__init__.py cursortrack/backends/base.py cursortrack/backends/windows.py cursortrack/backends/macos.py
 
     - name: Run tests with pytest
       run: |
         pytest
 
-  # Validates the OS-agnostic layers (core/, export/, CLI plumbing) on Linux using the
-  # mock backend, ahead of a real Linux InputBackend landing (see ROADMAP.md). This is
-  # not "Linux support" - the real WindowsBackend equivalent for Linux is still a stub -
-  # it just gives non-Windows contributors CI signal on the code they're most likely to
-  # touch (format/codec/events/session/export/CLI) without needing a Windows machine.
-  test-ubuntu-core:
+  # Runs the full suite - including the real X11 LinuxBackend integration tests -
+  # under a virtual X server (Xvfb), mirroring the Windows job's Python matrix.
+  test-linux:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13", "3.14"]
 
     steps:
     - uses: actions/checkout@v4
 
-    - name: Set up Python
+    - name: Set up Python ${{ matrix.python-version }}
       uses: actions/setup-python@v5
       with:
-        python-version: "3.12"
+        python-version: ${{ matrix.python-version }}
         cache: 'pip'
+
+    - name: Install X11 test dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends xvfb libx11-6 libxtst6
 
     - name: Install dependencies
       run: |
@@ -86,25 +94,9 @@ jobs:
           cursortrack/backends/linux.py \
           cursortrack/backends/macos.py
 
-    - name: Run tests with pytest
+    - name: Run tests with pytest under Xvfb
       run: |
-        pytest
-
-  # Stub for future Linux support
-  # test-linux:
-  #   runs-on: ubuntu-latest
-  #   steps:
-  #   - uses: actions/checkout@v4
-  #   - name: Set up Python
-  #     uses: actions/setup-python@v5
-  #     with:
-  #       python-version: "3.12"
-  #   - name: Install dependencies
-  #     run: |
-  #       python -m pip install --upgrade pip
-  #       python -m pip install .[dev,linux]
-  #   - name: Run tests
-  #     run: pytest
+        xvfb-run -a pytest
 
   # Stub for future macOS support
   # test-macos:

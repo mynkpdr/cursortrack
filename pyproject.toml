@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cursortrack"
-version = "0.1.0"
+version = "0.2.0"
 description = "Professional, cross-platform mouse and input tracking CLI tool and library."
 readme = "README.md"
 requires-python = ">=3.9"

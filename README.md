@@ -6,14 +6,14 @@
 
 **CursorTrack** is a professional, open-source, developer-friendly mouse and input tracking tool and Python library. It records mouse movements, clicks, scrolls, and touchpad gestures into a compact, delta-encoded, crash-safe binary format, and can play them back or export them to CSV, JSONL, NumPy (`.npy`), and Parquet formats for machine learning pipelines.
 
-v0.1 is targeted at a first-class, dependency-free experience on Windows (using native Win32 APIs via `ctypes`), with an OS-abstracted backend architecture designed for seamless Linux and macOS additions.
+v0.2 provides a first-class, dependency-free experience on **Windows** (native Win32 APIs via `ctypes`) and **Linux** (X11/XTest via `ctypes`, including XWayland sessions), with an OS-abstracted backend architecture designed for a seamless macOS addition.
 
 ---
 
 ## Features
 
 - **🟢 High-Fidelity Recording**: Sample cursor movements (up to 240+ Hz), mouse buttons (press/release), scrolls (vertical + horizontal), and touchpad gestures.
-- **⚡ Dependency-Free Playback**: Emulate mouse coordinates and clicks natively on Windows via Win32 ctypes (zero packages required to replay or capture position).
+- **⚡ Dependency-Free Playback**: Emulate mouse coordinates and clicks natively on Windows (Win32) and Linux (X11/XTest) via ctypes — zero packages required to replay or capture position.
 - **🔒 Playback Fail-Safe**: Instantly abort an active replay by moving your mouse manually into **any corner** of the screen or pressing the **Esc** key globally.
 - **📦 Crash-Safe Stream**: Buffers flush and `fsync` periodically to disk so that recordings are fully readable even if the script is abruptly killed.
 - **📊 Scientific Exporters**: Output tracks directly to CSV, JSON Lines, NumPy `.npy` arrays, or Parquet for analysis, training, and simulation in ML pipelines.
@@ -30,7 +30,8 @@ Install CursorTrack using `pip` from the local directory:
 pip install .
 
 # Install with click/scroll/touch capture support (requires pynput)
-pip install .[windows]
+pip install .[windows]   # on Windows
+pip install .[linux]     # on Linux
 
 # Install with zstd compression support
 pip install .[zstd]
@@ -43,7 +44,9 @@ pip install .[dev,zstd,ml]
 ```
 
 > [!NOTE]
-> `pip install .` alone gives you movement-only recording and full playback/export — both use dependency-free Win32 `ctypes` calls. Recording **clicks, scrolls, or touch gestures** additionally requires `pynput`, installed via the `[windows]` extra.
+> `pip install .` alone gives you movement-only recording and full playback/export — both use dependency-free `ctypes` calls (Win32 on Windows, X11/XTest on Linux). Recording **clicks, scrolls, or touch gestures** additionally requires `pynput`, installed via the `[windows]` or `[linux]` extra.
+>
+> On Linux, CursorTrack talks to the X server, so it needs the standard X11 client libraries (`libX11` and `libXtst`, preinstalled on virtually every desktop distribution) and a running X11 or XWayland session (`DISPLAY` set). On headless machines, wrap commands with `xvfb-run`.
 
 ---
 
@@ -114,8 +117,9 @@ print(df.head())
 
 ---
 
-## Known Limitations (v0.1.0)
+## Known Limitations (v0.2.0)
 
+- **Native Wayland windows are out of reach on Linux.** The Linux backend connects through X11, which also covers XWayland windows on Wayland desktops. However, events delivered to *native* Wayland clients cannot be globally captured, and emulation targeting them is blocked by the compositor's sandboxing — this applies to every unprivileged tool, not just CursorTrack. Pure X11 sessions have no such restriction. See [docs/architecture.md](docs/architecture.md#5-linux-x11wayland-notes) for details.
 - **Multi-finger touchpad gestures** (pinch-to-zoom, rotate, 3-finger app-switch, 4-finger virtual-desktop-switch) cannot be captured. Windows reserves these for its own shell-level gesture handling and never exposes them to background apps through any API — this isn't something CursorTrack (or any equivalent tool) can work around.
 - **Two-finger scroll may not be captured on some touchpads**, even with `--capture scroll` or `all` and `pynput` installed. Physical/USB mouse wheel scrolling is unaffected and always captured. See [docs/architecture.md](docs/architecture.md#4-touchpad-gesture-capture-limitations) for why.
 
