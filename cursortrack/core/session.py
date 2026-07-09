@@ -14,8 +14,8 @@ from cursortrack.core.events import (
     MoveEvent,
     ScrollEvent,
     TapEvent,
-    iter_events_v2,
-    iter_positions_v1,
+    decode_events_v2,
+    decode_positions_v1,
 )
 from cursortrack.core.format import read_header
 
@@ -28,10 +28,12 @@ class Session:
         header: dict[str, Any],
         events: list[InputEvent],
         file_path: str | None = None,
+        truncated: bool = False,
     ):
         self.header = header
         self.events = events
         self.file_path = file_path
+        self.truncated = truncated
 
     @property
     def version(self) -> int:
@@ -85,11 +87,11 @@ class Session:
 
         events: list[InputEvent]
         if header["version"] == 1:
-            events = list(iter_positions_v1(header["x0"], header["y0"], body))
+            events, truncated = decode_positions_v1(header["x0"], header["y0"], body)
         else:
-            events = list(iter_events_v2(header["x0"], header["y0"], body))
+            events, truncated = decode_events_v2(header["x0"], header["y0"], body)
 
-        return cls(header, events, path)
+        return cls(header, events, path, truncated=truncated)
 
     @classmethod
     def load_jsonl(cls, path: str) -> Session:
