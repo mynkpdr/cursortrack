@@ -48,6 +48,52 @@ class POINT(ctypes.Structure):
     _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
 
 
+def _last_error() -> int | None:
+    """Return the calling thread's last Win32 error code, or None off-Windows.
+
+    ctypes.get_last_error() only exists on Windows builds of ctypes; guarding
+    it lets the failure-path error message stay constructible in the
+    cross-platform mock tests for this module.
+    """
+    getter = getattr(ctypes, "get_last_error", None)
+    return getter() if getter is not None else None
+
+
+def _declare_prototypes(user32: Any) -> None:
+    """Declare ctypes argument/return types for every user32 call we make.
+
+    Without an explicit BOOL restype, a FALSE return from GetCursorPos could
+    be misread past ctypes' default int decoding, and unchecked argtypes
+    leave every call silently exposed to 32-/64-bit pointer truncation.
+    """
+    # Win32 BOOL is a typedef for int; c_int doubles as both here.
+    c_bool_ret, c_int, c_ulong = ctypes.c_int, ctypes.c_int, ctypes.c_ulong
+    ptr = ctypes.POINTER
+
+    user32.GetCursorPos.restype = c_bool_ret
+    user32.GetCursorPos.argtypes = [ptr(POINT)]
+
+    user32.SetCursorPos.restype = c_bool_ret
+    user32.SetCursorPos.argtypes = [c_int, c_int]
+
+    user32.GetSystemMetrics.restype = c_int
+    user32.GetSystemMetrics.argtypes = [c_int]
+
+    # DWORD dwFlags, dx, dy, dwData; ULONG_PTR dwExtraInfo (pointer-sized, hence c_void_p)
+    user32.mouse_event.restype = None
+    user32.mouse_event.argtypes = [c_ulong, c_ulong, c_ulong, c_ulong, ctypes.c_void_p]
+
+    if hasattr(user32, "SetProcessDpiAwarenessContext"):
+        # BOOL SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT) - the
+        # context is a pointer-sized pseudo-handle, hence c_void_p.
+        user32.SetProcessDpiAwarenessContext.restype = c_bool_ret
+        user32.SetProcessDpiAwarenessContext.argtypes = [ctypes.c_void_p]
+
+    if hasattr(user32, "SetProcessDPIAware"):
+        user32.SetProcessDPIAware.restype = c_bool_ret
+        user32.SetProcessDPIAware.argtypes = []
+
+
 def _enable_dpi_awareness(user32: Any) -> None:
     """Request per-monitor DPI awareness, falling back for older Windows.
 
@@ -76,17 +122,26 @@ class WindowsBackend(InputBackend):
             raise RuntimeError("WindowsBackend can only be initialized on Windows systems.")
 
         self._user32 = ctypes.windll.user32
+        _declare_prototypes(self._user32)
         _enable_dpi_awareness(self._user32)
 
-        self._point = POINT()
         self._listener: Any | None = None
 
     def read_position(self) -> tuple[int, int]:
-        self._user32.GetCursorPos(ctypes.byref(self._point))
-        return int(self._point.x), int(self._point.y)
+        # A fresh POINT per call: a shared instance-level buffer risked handing
+        # out a previous call's coordinates on failure, and torn reads if two
+        # threads ever queried through the same backend.
+        point = POINT()
+        if not self._user32.GetCursorPos(ctypes.byref(point)):
+            raise OSError(
+                f"GetCursorPos failed (error {_last_error()}); "
+                "refusing to return a stale cursor position."
+            )
+        return int(point.x), int(point.y)
 
     def set_position(self, x: int, y: int) -> None:
-        self._user32.SetCursorPos(int(x), int(y))
+        if not self._user32.SetCursorPos(int(x), int(y)):
+            raise OSError(f"SetCursorPos({x}, {y}) failed (error {_last_error()}).")
 
     def get_screen_size(self) -> tuple[int, int]:
         width = self._user32.GetSystemMetrics(SM_CXVIRTUALSCREEN)
