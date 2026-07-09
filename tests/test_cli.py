@@ -588,7 +588,9 @@ def test_record_refuses_to_overwrite_existing_file_without_force() -> None:
             ],
         )
         assert result.exit_code == 1
-        assert "Refusing to overwrite" in result.output
+        # Rich wraps long messages at terminal width, so normalize whitespace
+        # before matching a multi-word phrase.
+        assert "Refusing to overwrite" in " ".join(result.output.split())
 
         with open(session_file, "rb") as f:
             assert f.read() == b"pre-existing contents"
@@ -648,7 +650,7 @@ def test_export_refuses_to_overwrite_existing_destination_without_force() -> Non
 
         result = runner.invoke(app, ["export", session_file, "--to", "csv", "-o", export_csv])
         assert result.exit_code == 1
-        assert "Refusing to overwrite" in result.output
+        assert "Refusing to overwrite" in " ".join(result.output.split())
 
         with open(export_csv, encoding="utf-8") as f:
             assert f.read() == "pre-existing contents"
@@ -693,7 +695,7 @@ def test_export_refuses_same_path_as_input() -> None:
             app, ["export", jsonl_file, "--to", "jsonl", "-o", jsonl_file, "--force"]
         )
         assert result.exit_code == 1
-        assert "same file as the input" in result.output
+        assert "same file as the input" in " ".join(result.output.split())
 
         with open(jsonl_file, encoding="utf-8") as f:
             assert f.read() == original_contents
