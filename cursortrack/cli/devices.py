@@ -35,8 +35,6 @@ def main() -> None:
     for key, val in BACKEND_CLASSES.items():
         is_active = key == active_name
         status_str = "[bold green]Active[/bold green]" if is_active else "[dim]Inactive[/dim]"
-        if key == "macos" and active_name == "macos":
-            status_str = "[bold yellow]Active (NotImplemented Stub)[/bold yellow]"
 
         # Only the summary line: full docstrings span many lines and bloat the table.
         summary = (val.__doc__ or "Stub Backend").strip().splitlines()[0]
