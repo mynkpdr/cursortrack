@@ -684,9 +684,7 @@ def test_export_refuses_same_path_as_input() -> None:
         assert record_res.exit_code == 0
 
         jsonl_file = os.path.join(tmpdir, "session.jsonl")
-        export_res = runner.invoke(
-            app, ["export", session_file, "--to", "jsonl", "-o", jsonl_file]
-        )
+        export_res = runner.invoke(app, ["export", session_file, "--to", "jsonl", "-o", jsonl_file])
         assert export_res.exit_code == 0
         with open(jsonl_file, encoding="utf-8") as f:
             original_contents = f.read()
