@@ -87,6 +87,27 @@ def play(
     # Detect screen sizes
     scr_w, scr_h = backend.get_screen_size()
 
+    # Countdown delay. Sleep unconditionally so -q still enforces the safety
+    # grace period; only the per-second prints are gated on quiet. No Esc
+    # listener is running yet, so a Ctrl-C here needs no listener cleanup.
+    if not quiet:
+        console.print(
+            f"Preparing to play '[cyan]{file}[/cyan]' ({len(session.events)} events) at {speed}x speed..."
+        )
+        console.print(
+            "[bold yellow]FAIL-SAFE: Move mouse to any corner or press Esc to abort playback immediately.[/bold yellow]"
+        )
+    if delay > 0:
+        try:
+            for sec in range(delay, 0, -1):
+                if not quiet:
+                    console.print(f"Starting in {sec}... (Ctrl+C to abort)")
+                time.sleep(1)
+        except KeyboardInterrupt:
+            if not quiet:
+                console.print("\n[yellow]Countdown aborted by user (Ctrl+C).[/yellow]")
+            raise typer.Exit(code=130)
+
     abort_keyboard = False
     kb_listener: Any = None
     try:
@@ -116,18 +137,6 @@ def play(
                 "Keyboard abort shortcut (Esc) is disabled; the mouse-to-corner "
                 "fail-safe still works.[/yellow]"
             )
-
-    # Countdown delay
-    if not quiet:
-        console.print(
-            f"Preparing to play '[cyan]{file}[/cyan]' ({len(session.events)} events) at {speed}x speed..."
-        )
-        console.print(
-            "[bold yellow]FAIL-SAFE: Move mouse to any corner or press Esc to abort playback immediately.[/bold yellow]"
-        )
-        for sec in range(delay, 0, -1):
-            console.print(f"Starting in {sec}... (Ctrl+C to abort)")
-            time.sleep(1)
 
     # Windows timer resolution adjustment
     if sys.platform.startswith("win"):
@@ -206,6 +215,7 @@ def play(
         return True
 
     aborted = False
+    interrupted = False
     try:
         while True:
             success = run_playback_once()
@@ -219,6 +229,7 @@ def play(
                 time.sleep(0.5)
     except KeyboardInterrupt:
         aborted = True
+        interrupted = True
         if not quiet:
             console.print("\n[yellow]Playback stopped by user (Ctrl+C).[/yellow]")
     finally:
@@ -235,3 +246,10 @@ def play(
 
     if not quiet and not aborted:
         console.print("[bold green]✔ Playback complete.[/bold green]")
+
+    # An aborted playback must not exit 0 like success: scripts checking $?
+    # need to tell fail-safe/Esc aborts (1) apart from a Ctrl-C signal (130).
+    if interrupted:
+        raise typer.Exit(code=130)
+    if aborted:
+        raise typer.Exit(code=1)
