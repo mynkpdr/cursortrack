@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **macOS Input Backend**: Implemented `MacOSBackend` using direct `ctypes` calls into `CoreGraphics`/`CoreFoundation` — `CGEventGetLocation` for position sampling, `CGEventCreateMouseEvent`/`CGEventCreateScrollWheelEvent` + `CGEventPost` for movement, click, and scroll emulation. No `pyobjc` dependency for this path; click/scroll capture reuses `pynput` (which pulls in `pyobjc` transitively on macOS) via the `[macos]` extra.
+- **macOS-aware Diagnostics**: `cursortrack doctor` reports macOS as supported and surfaces whether Accessibility permission (`AXIsProcessTrusted()`) is granted — required for both emulation and capture, and silently ineffective (no error) without it.
+- **macOS CI Job**: Added a `test-macos` job (`macos-latest`, Python 3.9 and 3.13) mirroring the Linux/Windows jobs' lint/type-check/test structure. Permission-gated tests (position/click emulation round-trips, hook capture) skip themselves in CI, since GitHub-hosted macOS runners cannot grant Accessibility permission.
+
+### Notes
+- `pynput`'s macOS listener cannot currently distinguish x1/x2 side-button presses from a middle click (it dispatches on `CGEventType` alone, without reading the button-number field) — this only affects *recording*; `play` still emulates x1/x2 correctly. See docs/architecture.md §6.
+- `get_screen_size()` reports the main display only (`CGMainDisplayID()`), matching the existing single-screen scope of the Windows backend.
+
 ## [0.2.0] - 2026-07-09
 
 This release brings first-class Linux support: recording, playback, and capture now work on X11 sessions (and XWayland on Wayland desktops) with the same dependency-free design as the Windows backend.
