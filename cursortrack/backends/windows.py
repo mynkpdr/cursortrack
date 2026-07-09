@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import contextlib
 import ctypes
 import sys
 from typing import Any, Callable
 
+from cursortrack.backends._pynput_listener import verify_listener_running
 from cursortrack.backends.base import InputBackend
 from cursortrack.core.events import CAP_CLICK, CAP_SCROLL, CAP_TOUCH
 
@@ -129,7 +131,20 @@ class WindowsBackend(InputBackend):
         )
         self._listener.start()
 
+        try:
+            verify_listener_running(
+                self._listener,
+                "The pynput mouse hook failed to start. Check that no "
+                "security software is blocking the low-level mouse hook and "
+                "that the process has permission to install one.",
+            )
+        except RuntimeError:
+            self._listener = None
+            raise
+
     def stop_listening(self) -> None:
         if self._listener is not None:
             self._listener.stop()
+            with contextlib.suppress(Exception):
+                self._listener.join(timeout=2.0)
             self._listener = None
