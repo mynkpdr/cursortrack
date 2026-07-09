@@ -566,6 +566,141 @@ def test_play_prints_completion_message_only_on_success() -> None:
         assert "Playback complete" in play_res.output
 
 
+def test_record_refuses_to_overwrite_existing_file_without_force() -> None:
+    """Recording to a path that already exists should fail fast, not clobber it."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        session_file = os.path.join(tmpdir, "session.ctrk")
+        with open(session_file, "wb") as f:
+            f.write(b"pre-existing contents")
+
+        result = runner.invoke(
+            app,
+            [
+                "record",
+                "-o",
+                session_file,
+                "--backend",
+                "mock",
+                "--seconds",
+                "0.1",
+                "--no-spin",
+                "-q",
+            ],
+        )
+        assert result.exit_code == 1
+        assert "Refusing to overwrite" in result.output
+
+        with open(session_file, "rb") as f:
+            assert f.read() == b"pre-existing contents"
+
+
+def test_record_overwrites_existing_file_with_force() -> None:
+    """--force must allow recording to replace a pre-existing file."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        session_file = os.path.join(tmpdir, "session.ctrk")
+        with open(session_file, "wb") as f:
+            f.write(b"pre-existing contents")
+
+        result = runner.invoke(
+            app,
+            [
+                "record",
+                "-o",
+                session_file,
+                "--backend",
+                "mock",
+                "--seconds",
+                "0.1",
+                "--no-spin",
+                "-q",
+                "--force",
+            ],
+        )
+        assert result.exit_code == 0
+        assert os.path.getsize(session_file) > len(b"pre-existing contents")
+
+
+def test_export_refuses_to_overwrite_existing_destination_without_force() -> None:
+    """Exporting to a path that already exists should fail fast, not clobber it."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        session_file = os.path.join(tmpdir, "session.ctrk")
+        record_res = runner.invoke(
+            app,
+            [
+                "record",
+                "-o",
+                session_file,
+                "--backend",
+                "mock",
+                "--seconds",
+                "0.1",
+                "--codec",
+                "raw",
+                "--no-spin",
+                "-q",
+            ],
+        )
+        assert record_res.exit_code == 0
+
+        export_csv = os.path.join(tmpdir, "exported.csv")
+        with open(export_csv, "w", encoding="utf-8") as f:
+            f.write("pre-existing contents")
+
+        result = runner.invoke(app, ["export", session_file, "--to", "csv", "-o", export_csv])
+        assert result.exit_code == 1
+        assert "Refusing to overwrite" in result.output
+
+        with open(export_csv, encoding="utf-8") as f:
+            assert f.read() == "pre-existing contents"
+
+        force_result = runner.invoke(
+            app, ["export", session_file, "--to", "csv", "-o", export_csv, "--force"]
+        )
+        assert force_result.exit_code == 0
+        with open(export_csv, encoding="utf-8") as f:
+            assert "pre-existing contents" not in f.read()
+
+
+def test_export_refuses_same_path_as_input() -> None:
+    """Exporting a jsonl file onto itself must be refused, even with --force."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        session_file = os.path.join(tmpdir, "session.ctrk")
+        record_res = runner.invoke(
+            app,
+            [
+                "record",
+                "-o",
+                session_file,
+                "--backend",
+                "mock",
+                "--seconds",
+                "0.1",
+                "--codec",
+                "raw",
+                "--no-spin",
+                "-q",
+            ],
+        )
+        assert record_res.exit_code == 0
+
+        jsonl_file = os.path.join(tmpdir, "session.jsonl")
+        export_res = runner.invoke(
+            app, ["export", session_file, "--to", "jsonl", "-o", jsonl_file]
+        )
+        assert export_res.exit_code == 0
+        with open(jsonl_file, encoding="utf-8") as f:
+            original_contents = f.read()
+
+        result = runner.invoke(
+            app, ["export", jsonl_file, "--to", "jsonl", "-o", jsonl_file, "--force"]
+        )
+        assert result.exit_code == 1
+        assert "same file as the input" in result.output
+
+        with open(jsonl_file, encoding="utf-8") as f:
+            assert f.read() == original_contents
+
+
 def test_play_loop_runs_multiple_passes_before_failsafe_stops_it() -> None:
     """--loop should replay the session again after finishing, not just play it once."""
     with tempfile.TemporaryDirectory() as tmpdir:

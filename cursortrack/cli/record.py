@@ -18,6 +18,7 @@ from rich.text import Text
 
 from cursortrack.backends import get_backend
 from cursortrack.cli._format import format_hms, format_size
+from cursortrack.cli._io import refuse_overwrite
 from cursortrack.core.codec import (
     CODEC_NAME,
     CODEC_RAW,
@@ -215,6 +216,12 @@ def record(
     delay: int = typer.Option(
         3, "--delay", "-d", help="Countdown delay in seconds before recording starts."
     ),
+    force: bool = typer.Option(
+        False,
+        "--force/--no-force",
+        "-f",
+        help="Overwrite the output file if it already exists.",
+    ),
 ) -> None:
     """Record physical mouse and touch gestures into a compact, crash-safe binary format."""
     global _STOP
@@ -250,6 +257,8 @@ def record(
         out_file = f"cursor_{timestamp}.ctrk"
     else:
         out_file = out
+
+    refuse_overwrite(out_file, force, console)
 
     # Fetch backend
     try:
