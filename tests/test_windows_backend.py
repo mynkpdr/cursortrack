@@ -87,7 +87,10 @@ def test_declare_prototypes_sets_explicit_bool_restype_for_position_calls() -> N
     dummy: Any = type(
         "_Dummy",
         (),
-        {name: type(name, (), {})() for name in ("GetCursorPos", "SetCursorPos", "GetSystemMetrics", "mouse_event")},
+        {
+            name: type(name, (), {})()
+            for name in ("GetCursorPos", "SetCursorPos", "GetSystemMetrics", "mouse_event")
+        },
     )()
 
     _declare_prototypes(dummy)
