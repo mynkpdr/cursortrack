@@ -215,8 +215,15 @@ class MacOSBackend(InputBackend):
 
     def get_screen_size(self) -> tuple[int, int]:
         # Main display only - a known limitation shared with the Windows
-        # backend's GetSystemMetrics(SM_CXSCREEN)/(SM_CYSCREEN) (pre-#16);
+        # backend's pre-#16 GetSystemMetrics(SM_CXSCREEN)/(SM_CYSCREEN);
         # multi-monitor parity is tracked separately in docs/architecture.md.
+        #
+        # InputBackend.get_screen_bounds() is not overridden here: its
+        # default (origin (0, 0), this method's width/height) is already
+        # correct for the main display, since Quartz defines its global
+        # coordinate space with (0, 0) at the main display's top-left by
+        # construction - there is no separate "virtual desktop origin" query
+        # to make, unlike Windows' SM_XVIRTUALSCREEN/SM_YVIRTUALSCREEN.
         display_id = self._cg.CGMainDisplayID()
         width = self._cg.CGDisplayPixelsWide(display_id)
         height = self._cg.CGDisplayPixelsHigh(display_id)
