@@ -8,6 +8,7 @@ from typing import Optional
 import typer
 from rich.console import Console
 
+from cursortrack.cli._io import refuse_overwrite
 from cursortrack.core.session import Session
 from cursortrack.export import export_session
 
@@ -32,6 +33,12 @@ def export(
         "-o",
         help="Optional destination path. Defaults to same directory as input file.",
     ),
+    force: bool = typer.Option(
+        False,
+        "--force/--no-force",
+        "-f",
+        help="Overwrite the destination file if it already exists.",
+    ),
 ) -> None:
     """Translate compressed session recordings into developer/ML formats (CSV, JSONL, Npy, Parquet)."""
     if not os.path.exists(file):
@@ -53,6 +60,14 @@ def export(
         out_path = f"{base}.{fmt}"
     else:
         out_path = out
+
+    if os.path.exists(out_path) and os.path.samefile(file, out_path):
+        console.print(
+            f"[bold red]Error:[/bold red] Destination {out_path} is the same file as the input. "
+            "Choose a different --out path."
+        )
+        raise typer.Exit(code=1)
+    refuse_overwrite(out_path, force, console)
 
     console.print(f"Decoding and exporting [cyan]{file}[/cyan] -> [green]{out_path}[/green]...")
 
