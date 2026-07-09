@@ -42,6 +42,121 @@ PYNPUT_BUTTON_ALIASES: dict[str, str] = {
 CURRENT_TIME = 0
 
 
+class _XErrorEvent(ctypes.Structure):
+    """Layout of XErrorEvent from X11/Xlib.h (verified against upstream libX11)."""
+
+    _fields_ = [
+        ("type", ctypes.c_int),
+        ("display", ctypes.c_void_p),
+        ("resourceid", ctypes.c_ulong),
+        ("serial", ctypes.c_ulong),
+        ("error_code", ctypes.c_ubyte),
+        ("request_code", ctypes.c_ubyte),
+        ("minor_code", ctypes.c_ubyte),
+    ]
+
+
+_X_ERROR_HANDLER_TYPE = ctypes.CFUNCTYPE(
+    ctypes.c_int, ctypes.c_void_p, ctypes.POINTER(_XErrorEvent)
+)
+_X_IO_ERROR_HANDLER_TYPE = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p)
+_X_IO_ERROR_EXIT_HANDLER_TYPE = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void_p)
+
+#: Display pointers whose X server connection has been lost. Checked by every
+#: backend method so a dead connection raises instead of misbehaving.
+_DEAD_DISPLAYS: set[int] = set()
+
+_protocol_errors_reported: set[tuple[int, int]] = set()
+
+# The callback objects must stay referenced for the process lifetime: if Python
+# garbage-collects them, libX11 would call into freed memory.
+_error_handler_ref: Any = None
+_io_error_handler_ref: Any = None
+_io_exit_handler_ref: Any = None
+
+
+@_X_ERROR_HANDLER_TYPE  # type: ignore[untyped-decorator, misc]
+def _on_x_protocol_error(_display: int, event: Any) -> int:
+    """Log non-fatal X protocol errors once per kind and keep running.
+
+    Xlib's *default* handler prints a message and then calls exit(), which
+    would kill the whole process (discarding any recording still buffered in
+    memory) over conditions as mundane as a BadWindow race.
+    """
+    ev = event.contents
+    key = (int(ev.error_code), int(ev.request_code))
+    if key not in _protocol_errors_reported:
+        _protocol_errors_reported.add(key)
+        sys.stderr.write(
+            f"cursortrack: ignoring X protocol error (error_code={ev.error_code}, "
+            f"request_code={ev.request_code}, minor_code={ev.minor_code})\n"
+        )
+    return 0
+
+
+@_X_IO_ERROR_HANDLER_TYPE  # type: ignore[untyped-decorator, misc]
+def _on_x_io_error(display: int) -> int:
+    """Record the dead connection in place of the default fatal-IO handler.
+
+    The *default* handler prints "XIO: fatal IO error" and calls exit(1)
+    itself. Replacing it lets _XIOError proceed to the per-display exit
+    handler below, which is what actually prevents process termination.
+    """
+    if display:
+        _DEAD_DISPLAYS.add(display)
+    return 0
+
+
+@_X_IO_ERROR_EXIT_HANDLER_TYPE  # type: ignore[untyped-decorator, misc]
+def _on_x_io_error_exit(display: int, _user_data: int) -> None:
+    """Mark the display dead instead of letting Xlib exit() the process.
+
+    Registered via XSetIOErrorExitHandler (libX11 >= 1.6.9): on a fatal IO
+    error (X server gone, connection dropped) Xlib invokes this and the
+    failing call returns to the caller, rather than terminating Python.
+    """
+    if display:
+        _DEAD_DISPLAYS.add(display)
+
+
+def _install_error_handlers(xlib: ctypes.CDLL, display: int) -> bool:
+    """Install process-wide protocol/IO handlers and the per-display exit handler.
+
+    Returns True if the connection can survive an IO error (i.e. the running
+    libX11 provides XSetIOErrorExitHandler); False on very old libX11, where
+    a lost connection still exits the process (the pre-handler behavior).
+    Both pieces are required for survival: the IO error handler stops the
+    default handler's own exit(1), and the exit handler replaces the final
+    unconditional exit inside _XIOError.
+    """
+    global _error_handler_ref, _io_error_handler_ref, _io_exit_handler_ref
+
+    if _error_handler_ref is None:
+        xlib.XSetErrorHandler.restype = ctypes.c_void_p
+        xlib.XSetErrorHandler.argtypes = [_X_ERROR_HANDLER_TYPE]
+        xlib.XSetErrorHandler(_on_x_protocol_error)
+        _error_handler_ref = _on_x_protocol_error
+
+    try:
+        exit_setter = xlib.XSetIOErrorExitHandler
+    except AttributeError:
+        # Without the exit-handler API a returning IO handler still ends in
+        # exit(1), so leave the default in place (it at least prints a reason).
+        return False
+
+    if _io_error_handler_ref is None:
+        xlib.XSetIOErrorHandler.restype = ctypes.c_void_p
+        xlib.XSetIOErrorHandler.argtypes = [_X_IO_ERROR_HANDLER_TYPE]
+        xlib.XSetIOErrorHandler(_on_x_io_error)
+        _io_error_handler_ref = _on_x_io_error
+
+    exit_setter.restype = None
+    exit_setter.argtypes = [ctypes.c_void_p, _X_IO_ERROR_EXIT_HANDLER_TYPE, ctypes.c_void_p]
+    exit_setter(display, _on_x_io_error_exit, None)
+    _io_exit_handler_ref = _on_x_io_error_exit
+    return True
+
+
 def _load_x11_library(name: str, fallback: str) -> ctypes.CDLL:
     """Load a shared X11 library by short name, with a conventional soname fallback."""
     path = ctypes.util.find_library(name) or fallback
@@ -116,6 +231,15 @@ def _declare_prototypes(xlib: ctypes.CDLL, xtst: ctypes.CDLL) -> None:
     xlib.XSync.restype = c_int
     xlib.XSync.argtypes = [c_void_p, c_int]
 
+    xtst.XTestQueryExtension.restype = c_int
+    xtst.XTestQueryExtension.argtypes = [
+        c_void_p,  # display
+        ptr(c_int),  # event_base_return
+        ptr(c_int),  # error_base_return
+        ptr(c_int),  # major_version_return
+        ptr(c_int),  # minor_version_return
+    ]
+
     xtst.XTestFakeButtonEvent.restype = c_int
     xtst.XTestFakeButtonEvent.argtypes = [c_void_p, c_uint, c_int, c_ulong]
 
@@ -150,18 +274,50 @@ class LinuxBackend(InputBackend):
                 "'xvfb-run cursortrack ...'."
             )
 
+        # Without these, Xlib's default handlers exit() the whole process on a
+        # protocol error or a dropped server connection - no exception, no
+        # chance for the recorder to flush its partially written session file.
+        self._survives_io_error = _install_error_handlers(self._xlib, self._display)
+
+        event_base = ctypes.c_int()
+        error_base = ctypes.c_int()
+        major = ctypes.c_int()
+        minor = ctypes.c_int()
+        if not self._xtst.XTestQueryExtension(
+            self._display,
+            ctypes.byref(event_base),
+            ctypes.byref(error_base),
+            ctypes.byref(major),
+            ctypes.byref(minor),
+        ):
+            self._xlib.XCloseDisplay(self._display)
+            self._display = 0
+            raise RuntimeError(
+                "The X server does not support the XTest extension, which CursorTrack "
+                "requires for input emulation. Virtually all servers (including Xvfb "
+                "and XWayland) ship it; check your server configuration."
+            )
+
         self._screen = self._xlib.XDefaultScreen(self._display)
         self._root = self._xlib.XRootWindow(self._display, self._screen)
         self._listener: Any | None = None
 
     def __del__(self) -> None:
         display = getattr(self, "_display", None)
-        if display:
+        if display and display not in _DEAD_DISPLAYS:
             with contextlib.suppress(Exception):
                 self._xlib.XCloseDisplay(display)
-            self._display = None
+            self._display = 0
+
+    def _ensure_alive(self) -> None:
+        if self._display in _DEAD_DISPLAYS:
+            raise RuntimeError(
+                "The X11 display connection has been lost (the X server closed or the "
+                "session ended). Create a new backend instance to reconnect."
+            )
 
     def read_position(self) -> tuple[int, int]:
+        self._ensure_alive()
         root_return = ctypes.c_ulong()
         child_return = ctypes.c_ulong()
         root_x = ctypes.c_int()
@@ -180,6 +336,9 @@ class LinuxBackend(InputBackend):
             ctypes.byref(win_y),
             ctypes.byref(mask),
         )
+        # The connection can die inside the query itself; the failing call
+        # returns garbage rather than valid coordinates, so re-check.
+        self._ensure_alive()
         return int(root_x.value), int(root_y.value)
 
     def _sync(self) -> None:
@@ -188,17 +347,21 @@ class LinuxBackend(InputBackend):
         # other clients' hooks, whereas XSync guarantees the server processed them.
         # pynput's own Linux controller syncs after every injection for the same reason.
         self._xlib.XSync(self._display, 0)
+        self._ensure_alive()
 
     def set_position(self, x: int, y: int) -> None:
+        self._ensure_alive()
         self._xlib.XWarpPointer(self._display, 0, self._root, 0, 0, 0, 0, int(x), int(y))
         self._sync()
 
     def get_screen_size(self) -> tuple[int, int]:
+        self._ensure_alive()
         width = self._xlib.XDisplayWidth(self._display, self._screen)
         height = self._xlib.XDisplayHeight(self._display, self._screen)
         return int(width), int(height)
 
     def click(self, button: str, pressed: bool) -> None:
+        self._ensure_alive()
         # Unknown button names are a no-op: substituting a left click (the old
         # fallback) performs a real, potentially destructive action the user
         # never recorded.
@@ -213,6 +376,7 @@ class LinuxBackend(InputBackend):
         self._xtst.XTestFakeButtonEvent(self._display, x_button, 0, CURRENT_TIME)
 
     def scroll(self, sdx: int, sdy: int) -> None:
+        self._ensure_alive()
         # X11 core protocol has no scroll-delta events: each wheel "step" is a
         # press+release of buttons 4-7.
         if sdy != 0:
