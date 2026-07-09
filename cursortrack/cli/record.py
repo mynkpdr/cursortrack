@@ -326,6 +326,7 @@ def record(
     last_event_frame = 0
     prev_pos = (x0, y0)
     event_counts = {"move": 1, "down": 0, "up": 0, "scroll": 0, "tap": 0}
+    unknown_buttons_seen: set[str] = set()
 
     perf = time.perf_counter
     record_t0 = perf()
@@ -339,6 +340,21 @@ def record(
             except queue.Empty:
                 break
 
+            # Buttons outside the format's vocabulary must be dropped before any
+            # frame/position bookkeeping is touched: encoding them as "left"
+            # (the old behavior) made replay perform clicks the user never made.
+            if kind == "click" and capture & CAP_CLICK:
+                btn_name = payload[2]
+                if btn_name not in BUTTON_ID:
+                    if btn_name not in unknown_buttons_seen:
+                        unknown_buttons_seen.add(btn_name)
+                        console.print(
+                            f"[yellow]Warning:[/yellow] ignoring clicks from "
+                            f"unsupported button '{btn_name}' (not representable "
+                            f"in the session format)."
+                        )
+                    continue
+
             ev_frame = max(last_event_frame, round((t_perf - record_t0) * hz))
             dframes = max(0, ev_frame - last_event_frame)
             last_event_frame = ev_frame
@@ -347,10 +363,10 @@ def record(
                 x, y, btn_name, pressed = payload
                 dx, dy = x - prev_pos[0], y - prev_pos[1]
                 prev_pos = (x, y)
-                btn_id = BUTTON_ID.get(btn_name, 0)
 
                 if capture & CAP_CLICK:
-                    encode_click(buf, dframes, pressed, btn_id, dx, dy)
+                    # btn_name is guaranteed known here by the guard above.
+                    encode_click(buf, dframes, pressed, BUTTON_ID[btn_name], dx, dy)
                     event_counts["down" if pressed else "up"] += 1
                 elif capture & CAP_TOUCH:
                     # Map to tap
