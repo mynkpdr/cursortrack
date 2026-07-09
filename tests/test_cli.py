@@ -6,7 +6,8 @@ import json
 import os
 import tempfile
 import time
-from typing import Any, Callable
+from typing import Any, Callable, ClassVar
+from unittest import mock
 
 from typer.testing import CliRunner
 
@@ -42,6 +43,40 @@ class CornerAbortBackend(InputBackend):
         return self.pos
 
     def set_position(self, x: int, y: int) -> None:
+        self.pos = (x, y)
+
+    def get_screen_size(self) -> tuple[int, int]:
+        return (1920, 1080)
+
+    def click(self, button: str, pressed: bool) -> None:
+        pass
+
+    def scroll(self, sdx: int, sdy: int) -> None:
+        pass
+
+    def start_listening(
+        self, on_event: Callable[[str, tuple[Any, ...], float], None], capture_mask: int
+    ) -> None:
+        pass
+
+    def stop_listening(self) -> None:
+        pass
+
+
+class MoveOrderBackend(InputBackend):
+    """Mock backend that logs each cursor move, for asserting call ordering vs. sleeps."""
+
+    #: Shared log of "move" entries, reset by each test before use.
+    log: ClassVar[list[str]] = []
+
+    def __init__(self) -> None:
+        self.pos = (500, 500)
+
+    def read_position(self) -> tuple[int, int]:
+        return self.pos
+
+    def set_position(self, x: int, y: int) -> None:
+        type(self).log.append("move")
         self.pos = (x, y)
 
     def get_screen_size(self) -> tuple[int, int]:
@@ -518,9 +553,9 @@ def test_play_failsafe_aborts_immediately_on_corner() -> None:
                 "--no-spin",
             ],
         )
-        assert play_res.exit_code == 0
+        # An aborted playback must not exit 0 like success.
+        assert play_res.exit_code == 1
         assert "Fail-safe triggered" in play_res.output
-        # An aborted playback must not claim success.
         assert "Playback complete" not in play_res.output
 
 
@@ -610,7 +645,73 @@ def test_play_loop_runs_multiple_passes_before_failsafe_stops_it() -> None:
                 "--no-spin",
             ],
         )
-        assert play_res.exit_code == 0
+        # An aborted playback must not exit 0 like success.
+        assert play_res.exit_code == 1
         assert "Replaying loop..." in play_res.output
         assert "Fail-safe triggered" in play_res.output
         assert "Playback complete" not in play_res.output
+
+
+def test_play_quiet_still_sleeps_through_delay_before_moving_cursor() -> None:
+    """`-q --delay 3` must sleep out the full countdown before touching the cursor.
+
+    Regression test: the countdown's time.sleep() call used to live inside
+    `if not quiet:`, so `-q` skipped the safety delay entirely.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        session_file = os.path.join(tmpdir, "session.ctrk")
+        record_res = runner.invoke(
+            app,
+            [
+                "record",
+                "-o",
+                session_file,
+                "--backend",
+                "mock",
+                "--hz",
+                "20",
+                "--seconds",
+                "0.2",
+                "--codec",
+                "raw",
+                "--no-spin",
+                "-q",
+            ],
+        )
+        assert record_res.exit_code == 0
+
+        MoveOrderBackend.log = []
+        BACKEND_CLASSES["mock"] = MoveOrderBackend
+
+        sleep_calls: list[float] = []
+
+        def fake_sleep(seconds: float) -> None:
+            sleep_calls.append(seconds)
+            MoveOrderBackend.log.append(f"sleep:{seconds}")
+
+        with mock.patch("time.sleep", side_effect=fake_sleep):
+            play_res = runner.invoke(
+                app,
+                [
+                    "play",
+                    session_file,
+                    "--backend",
+                    "mock",
+                    "--speed",
+                    "50",
+                    "--delay",
+                    "3",
+                    "--no-spin",
+                    "-q",
+                ],
+            )
+
+        assert play_res.exit_code == 0
+        assert sleep_calls.count(1) == 3
+
+        first_move = MoveOrderBackend.log.index("move")
+        countdown_sleep_positions = [
+            i for i, e in enumerate(MoveOrderBackend.log) if e == "sleep:1"
+        ][:3]
+        assert len(countdown_sleep_positions) == 3
+        assert max(countdown_sleep_positions) < first_move
