@@ -4,19 +4,23 @@ This document outlines the milestones and steps required to complete first-class
 
 ---
 
-## Milestone 1: Linux (X11 & Wayland) Support
+## Milestone 1: Linux (X11) Support — ✅ Shipped in v0.2.0
 
-Linux input tracking is split into two window manager architectures: X11 (legacy, still widely used) and Wayland (modern, sandboxed, default on Ubuntu/Fedora).
+Delivered by `LinuxBackend` (see [docs/architecture.md](docs/architecture.md#5-linux-x11wayland-notes)):
+- Coordinate retrieval and warping through `libX11` via `ctypes` (`XQueryPointer`/`XWarpPointer`) — dependency-free, no `python-xlib` needed.
+- Click and scroll emulation through the X11 Test Extension (`XTestFakeButtonEvent`).
+- Global click/scroll capture through `pynput`'s X11 hooks.
+- Works on X11 sessions and against XWayland on Wayland desktops; validated in CI under Xvfb across Python 3.9–3.14.
+
+---
+
+## Milestone 1b: Native Wayland Support
+
+Wayland prevents clients from capturing global coordinate information or driving other windows directly due to sandboxing, so input delivered to native Wayland clients is out of reach for the X11-based backend.
 
 ### Key Tasks:
-1. **Coordinate Retrieval and Emulation (X11)**:
-   - Use `python-xlib` (already standard and lightweight) to read and set cursor coordinates on the active display.
-   - Use X11 Test Extension (`XTest`) for zero-dependency clicks and scroll emulation.
-2. **Coordinate Retrieval and Emulation (Wayland)**:
-   - Wayland prevents clients from capturing global coordinate information or driving other windows directly due to sandboxing.
-   - Research and implement Portal APIs (`org.freedesktop.portal.RemoteDesktop`) or read raw events from `/dev/input/` (requires root/input group permissions).
-3. **Global Listener Hook**:
-   - Use `pynput` as the primary background event listening engine (which falls back to X11 hooks).
+1. Research and implement Portal APIs (`org.freedesktop.portal.RemoteDesktop`) for permission-prompted capture and injection.
+2. Alternatively, read raw events from `/dev/input/` (requires root/`input` group permissions) for capture-only workflows.
 
 ---
 

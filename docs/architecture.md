@@ -15,8 +15,8 @@ graph TD
     
     A --> F[cursortrack.backends]
     F --> G[InputBackend Abstract Interface]
-    G --> H[WindowsBackend ctypes/pynput]
-    G --> I[LinuxBackend Stub]
+    G --> H[WindowsBackend Win32 ctypes/pynput]
+    G --> I[LinuxBackend X11/XTest ctypes/pynput]
     G --> J[macOSBackend Stub]
 
     B --> K[cursortrack.export]
@@ -71,3 +71,22 @@ To prevent simulated replays from capturing display focus and locking out human 
 - It cannot be exercised by CI at all — GitHub Actions Windows runners have no touchpad hardware, so this subsystem would have zero automated regression coverage, unlike everything else in this codebase.
 
 Contributions implementing raw digitizer capture are welcome; see [CONTRIBUTING.md](../CONTRIBUTING.md).
+
+---
+
+## 5. Linux (X11/Wayland) Notes
+
+`LinuxBackend` mirrors the Windows backend's dependency-free design: it drives the X server directly through `ctypes` against `libX11`/`libXtst` (no Python packages needed for playback or position sampling), and reuses `pynput` for global click/scroll capture hooks.
+
+**How each operation maps to X11:**
+- `read_position()` → `XQueryPointer` on the root window.
+- `set_position(x, y)` → `XWarpPointer` to root-window coordinates.
+- `get_screen_size()` → `XDisplayWidth`/`XDisplayHeight` of the default screen.
+- `click(button, pressed)` → `XTestFakeButtonEvent` (X buttons 1/2/3 for left/middle/right, 8/9 for x1/x2).
+- `scroll(sdx, sdy)` → the X11 core protocol has no scroll-delta events; each wheel step is a press+release of buttons 4-7 (up/down/left/right).
+
+**Why every injection is followed by `XSync`, not `XFlush`.** Xlib buffers protocol requests per connection. Flushing the buffer alone was observed (under Xvfb, with a `pynput` hook listening on a second connection) to leave `XTestFakeButtonEvent` requests undelivered to other clients' event hooks, while a full server round-trip (`XSync`) delivers them reliably. `pynput`'s own Linux controller syncs after every injection for the same reason. The cost is one round-trip per injected event, which is negligible against the recorder's sampling intervals.
+
+**Threading.** `XInitThreads` is called before any other Xlib call so a single backend's display connection is safe to touch from both the recorder's sampling loop and the playback fail-safe polling.
+
+**Wayland scope.** On Wayland desktops, CursorTrack connects to the XWayland compatibility server. Position reads, warps, and injected clicks work within the XWayland coordinate space, and capture hooks see events routed to X11 clients. What is *not* possible — for any unprivileged process, by compositor design — is globally capturing input delivered to native Wayland clients or injecting input into them. First-class native Wayland support would require the `org.freedesktop.portal.RemoteDesktop` portal (interactive permission prompts) or raw `/dev/input` access (root/`input` group); both are tracked in [ROADMAP.md](../ROADMAP.md).

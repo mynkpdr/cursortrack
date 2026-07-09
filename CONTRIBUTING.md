@@ -35,7 +35,7 @@ We enforce strict linting, formatting, and typing policies to keep the codebase 
 CursorTrack isolates all OS-specific routines behind the `InputBackend` abstract interface. This makes adding Linux or macOS support entirely additive without modifying CLI commands or file format serialization logic.
 
 ### Step 1: Implement the Backend Subclass
-Create or modify the backend file, e.g. `cursortrack/backends/linux.py` or `cursortrack/backends/macos.py`. Implement all required methods from the `InputBackend` class:
+Create or modify the backend file, e.g. `cursortrack/backends/macos.py` (the Windows and Linux backends in the same directory are good reference implementations). Implement all required methods from the `InputBackend` class:
 
 - `read_position()`: Return `(x, y)` coordinate tuple.
 - `set_position(x, y)`: Move the physical cursor.
@@ -54,14 +54,14 @@ If your backend introduces new platform-specific libraries:
 Open [cursortrack/backends/\_\_init\_\_.py](cursortrack/backends/__init__.py) and add your backend target mappings:
 
 ```python
-from cursortrack.backends.linux import LinuxBackend
+from cursortrack.backends.macos import MacOSBackend
 
 BACKEND_CLASSES: dict[str, type[InputBackend]] = {
     "win": WindowsBackend,
-    "linux": LinuxBackend,  # Now registers your custom class!
-    "macos": MacOSBackend,
+    "linux": LinuxBackend,
+    "macos": MacOSBackend,  # Now registers your custom class!
 }
 ```
 
 ### Step 4: Add Unit Tests
-Add verification coverage inside `tests/` using mocked interfaces or dummy setups to ensure tests run automatically on GitHub Actions CI.
+Add verification coverage inside `tests/` using mocked interfaces or dummy setups to ensure tests run automatically on GitHub Actions CI. If your backend can be exercised headlessly (as Linux is via `xvfb-run`), add real integration tests that skip gracefully when the required display/permissions are unavailable — see `tests/test_linux_backend.py` for the pattern.
