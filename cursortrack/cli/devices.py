@@ -35,12 +35,12 @@ def main() -> None:
     for key, val in BACKEND_CLASSES.items():
         is_active = key == active_name
         status_str = "[bold green]Active[/bold green]" if is_active else "[dim]Inactive[/dim]"
-        if (key == "linux" and active_name == "linux") or (
-            key == "macos" and active_name == "macos"
-        ):
+        if key == "macos" and active_name == "macos":
             status_str = "[bold yellow]Active (NotImplemented Stub)[/bold yellow]"
 
-        table.add_row(key, val.__doc__ or "Stub Backend", status_str)
+        # Only the summary line: full docstrings span many lines and bloat the table.
+        summary = (val.__doc__ or "Stub Backend").strip().splitlines()[0]
+        table.add_row(key, summary, status_str)
 
     console.print(table)
     console.print()
