@@ -132,3 +132,106 @@ def test_set_and_read_position_round_trip() -> None:
     assert backend.read_position() == (123, 217)
     backend.set_position(300, 40)
     assert backend.read_position() == (300, 40)
+
+
+# --- Listener hook-failure detection (#14) -----------------------------------
+
+
+def _bare_backend() -> WindowsBackend:
+    """Build a WindowsBackend without running __init__ (which needs ctypes.windll)."""
+    backend = object.__new__(WindowsBackend)
+    backend._listener = None
+    return backend
+
+
+@requires_windows
+def test_listener_is_running_after_start_listening() -> None:
+    """A successfully started listener must report `running` and stop cleanly.
+
+    Regression test for #14: start_listening() used to return without ever
+    checking whether pynput's low-level mouse hook actually came up, so a
+    failed hook install would record silently instead of raising.
+    """
+    pytest.importorskip("pynput")
+    from cursortrack.core.events import CAP_CLICK
+
+    backend = WindowsBackend()
+    backend.start_listening(lambda *_: None, CAP_CLICK)
+    try:
+        assert backend._listener is not None
+        assert backend._listener.running
+    finally:
+        backend.stop_listening()
+
+    assert backend._listener is None
+
+
+def test_start_listening_raises_when_hook_never_comes_up(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A dead listener thread must raise a clear RuntimeError, not record silently.
+
+    Regression test for #14. Mocks pynput.mouse.Listener directly, so this
+    runs on every platform (no Win32 API or real hook install needed).
+    """
+    # exc_type=ImportError (not just ModuleNotFoundError): pynput's own
+    # import can fail outright on a Linux box with no X display, which is an
+    # environment gap, not a regression to report as a test failure here.
+    pytest.importorskip("pynput", exc_type=ImportError)
+    from pynput import mouse
+
+    from cursortrack.core.events import CAP_CLICK
+
+    class DeadListener:
+        running = False
+
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def start(self) -> None:
+            pass  # simulates a hook install that silently fails
+
+        def stop(self) -> None:
+            pass
+
+        def join(self, timeout: float | None = None) -> None:
+            pass
+
+    monkeypatch.setattr(mouse, "Listener", DeadListener)
+
+    backend = _bare_backend()
+    with pytest.raises(RuntimeError, match="hook failed to start"):
+        backend.start_listening(lambda *_: None, CAP_CLICK)
+    assert backend._listener is None
+
+
+def test_stop_listening_joins_a_live_listener(monkeypatch: pytest.MonkeyPatch) -> None:
+    """stop_listening must stop and join the listener thread before clearing it."""
+    pytest.importorskip("pynput", exc_type=ImportError)
+    from pynput import mouse
+
+    from cursortrack.core.events import CAP_CLICK
+
+    calls: list[str] = []
+
+    class TrackingListener:
+        running = True
+
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def start(self) -> None:
+            calls.append("start")
+
+        def stop(self) -> None:
+            calls.append("stop")
+
+        def join(self, timeout: float | None = None) -> None:
+            calls.append(f"join:{timeout}")
+
+    monkeypatch.setattr(mouse, "Listener", TrackingListener)
+
+    backend = _bare_backend()
+    backend.start_listening(lambda *_: None, CAP_CLICK)
+    backend.stop_listening()
+
+    assert calls == ["start", "stop", "join:2.0"]
+    assert backend._listener is None

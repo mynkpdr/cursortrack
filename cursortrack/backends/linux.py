@@ -8,6 +8,7 @@ import ctypes.util
 import sys
 from typing import Any, Callable
 
+from cursortrack.backends._pynput_listener import verify_listener_running
 from cursortrack.backends.base import InputBackend
 from cursortrack.core.events import CAP_CLICK, CAP_SCROLL, CAP_TOUCH
 
@@ -427,7 +428,25 @@ class LinuxBackend(InputBackend):
         )
         self._listener.start()
 
+        try:
+            verify_listener_running(
+                self._listener,
+                "The pynput mouse hook failed to start on this X11 display. "
+                "Check that DISPLAY is set and the X server permits input "
+                "hooks (XTest/XRecord); the process may lack the required "
+                "permissions.",
+            )
+        except RuntimeError:
+            self._listener = None
+            raise
+
     def stop_listening(self) -> None:
+        # pynput's X11 listener can raise from stop()/join() during Xlib
+        # teardown races (e.g. AttributeError on a half-torn-down Listener);
+        # detecting a failed *start* is the point of #14, stop must be best-effort.
         if self._listener is not None:
-            self._listener.stop()
+            with contextlib.suppress(Exception):
+                self._listener.stop()
+            with contextlib.suppress(Exception):
+                self._listener.join(timeout=2.0)
             self._listener = None

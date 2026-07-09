@@ -250,6 +250,91 @@ def test_lost_x_connection_raises_instead_of_exiting_process() -> None:
 
 
 @requires_x11
+def test_listener_is_running_after_start_listening() -> None:
+    """A successfully started listener must report `running` and stop cleanly.
+
+    Regression test for #14: start_listening() used to return without ever
+    checking whether pynput's hook thread actually came up, so a failed hook
+    install would record silently instead of raising.
+
+    stop_listening() itself must tolerate pynput's teardown quirks (e.g. a
+    Xorg listener raising AttributeError from stop() on a teardown race) -
+    detecting a failed *start* is the point of #14, stop must never raise.
+    """
+    pytest.importorskip("pynput")
+    from cursortrack.core.events import CAP_CLICK
+
+    backend = get_backend("linux")
+    backend.start_listening(lambda *_: None, CAP_CLICK)
+    try:
+        assert backend._listener is not None
+        assert backend._listener.running
+    finally:
+        backend.stop_listening()
+
+    assert backend._listener is None
+
+
+@requires_x11
+def test_stop_listening_is_best_effort_against_a_broken_listener() -> None:
+    """stop_listening() must swallow errors from a listener's stop()/join().
+
+    Regression test: pynput's X11 listener can raise `AttributeError:
+    'Listener' object has no attribute '_display_record'` out of stop() on a
+    teardown race (observed in CI on Python 3.14). stop_listening() is not
+    the mechanism for detecting a failed start (that's verify_listener_running
+    above), so it must never propagate a teardown-time exception.
+    """
+    backend = get_backend("linux")
+
+    class BrokenListener:
+        def stop(self) -> None:
+            raise AttributeError("'Listener' object has no attribute '_display_record'")
+
+        def join(self, timeout: float | None = None) -> None:
+            del timeout
+            raise RuntimeError("cannot join a listener that never started cleanly")
+
+    backend._listener = BrokenListener()
+    backend.stop_listening()
+
+    assert backend._listener is None
+
+
+def test_verify_listener_running_raises_for_a_dead_listener() -> None:
+    """A listener whose `running` never flips True must raise, not be trusted.
+
+    Regression test for #14: pynput surfaces hook-install failures (no
+    display, hook rejected by the OS, missing permissions) by leaving the
+    listener thread dead rather than raising from `start()`. This is a pure
+    unit test against the shared verification helper (no real listener or
+    display needed), so it runs on every platform.
+    """
+    from cursortrack.backends._pynput_listener import verify_listener_running
+
+    class DeadListener:
+        running = False
+
+    with pytest.raises(RuntimeError, match="custom failure message"):
+        verify_listener_running(DeadListener(), "custom failure message", timeout=0.05)
+
+
+def test_verify_listener_running_accepts_a_listener_that_comes_up_late() -> None:
+    """The poll must not fail a listener that flips `running` shortly after start()."""
+    import threading
+
+    from cursortrack.backends._pynput_listener import verify_listener_running
+
+    class SlowListener:
+        running = False
+
+    listener = SlowListener()
+    threading.Timer(0.05, lambda: setattr(listener, "running", True)).start()
+
+    verify_listener_running(listener, "should not raise", timeout=0.5)
+
+
+@requires_x11
 def test_cli_record_and_play_on_real_linux_backend() -> None:
     """End-to-end CLI lifecycle on the real linux backend (not the mock)."""
     # Park the cursor away from screen corners so the playback fail-safe
