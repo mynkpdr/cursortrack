@@ -1,6 +1,6 @@
 # CursorTrack Roadmap
 
-This document outlines the milestones and steps required to complete first-class support for Linux and macOS platforms in CursorTrack.
+This document outlines the milestones and steps required to complete first-class support for Linux and macOS platforms in CursorTrack, and tracks follow-up work once each platform ships.
 
 ---
 
@@ -24,17 +24,15 @@ Wayland prevents clients from capturing global coordinate information or driving
 
 ---
 
-## Milestone 2: macOS (Quartz) Support
+## Milestone 2: macOS (CoreGraphics) Support — ✅ Shipped in v0.3.0
 
-Mac systems handle mouse and global event interception through Cocoa/Quartz APIs.
+Delivered by `MacOSBackend` (see [docs/architecture.md](docs/architecture.md#6-macos-coregraphics-notes)):
+- Coordinate retrieval and emulation through `CoreGraphics` via `ctypes` (`CGEventGetLocation`/`CGEventCreateMouseEvent` + `CGEventPost`) — dependency-free, no `pyobjc` needed for this path.
+- Click and scroll emulation through `CGEventCreateMouseEvent`/`CGEventCreateScrollWheelEvent` + `CGEventPost`.
+- Global click/scroll capture through `pynput`'s macOS (Quartz event tap) hooks.
+- Requires Accessibility permission (System Settings → Privacy & Security → Accessibility) for emulation and capture; `read_position`/`get_screen_size` work without it. `cursortrack doctor` reports the permission state.
+- Validated in CI on `macos-latest` for import/init/`read_position`/`get_screen_size`/no-op logic; permission-gated round-trip tests (`set_position`, click/scroll capture) skip themselves there, since GitHub-hosted macOS runners cannot grant Accessibility permission — see `tests/test_macos_backend.py`.
 
-### Key Tasks:
-1. **Quartz Integration**:
-   - Import Quartz frameworks (`pyobjc-framework-Quartz` / `pyobjc-core`).
-   - Read position via `CGEventGetLocation(CGEventCreate(None))` to obtain high-precision screen coordinates.
-   - Move cursor via `CGWarpMouseCursorPosition` or `CGEventCreateMouseEvent`.
-2. **Click & Scroll Emulation**:
-   - Post mouse events directly into the event stream using `CGEventPost` to simulate clicks and scroll wheel deltas.
-3. **Event Listening Hook**:
-   - Setup a background thread mapping dynamic Quartz Event Taps. This allows capturing mouse clicks and scroll coordinates globally (requires Accessibility permission).
-   - Alternatively, fall back to `pynput`'s macOS AppKit listener.
+### Follow-up work not yet done:
+1. **Multi-display `get_screen_size()`/`get_screen_bounds()`.** Currently reports only `CGMainDisplayID()`'s pixel dimensions; the Windows backend already covers its full virtual desktop, so macOS should follow (e.g. `CGGetActiveDisplayList` union bounds).
+2. **x1/x2 side-button capture identity.** `pynput`'s macOS listener cannot currently distinguish side buttons from a middle click (see architecture doc); fixing this would require either a `pynput` upstream fix or a custom Quartz event tap reading `kCGMouseEventButtonNumber` directly, bypassing `pynput` for capture.

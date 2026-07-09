@@ -17,7 +17,7 @@ graph TD
     F --> G[InputBackend Abstract Interface]
     G --> H[WindowsBackend Win32 ctypes/pynput]
     G --> I[LinuxBackend X11/XTest ctypes/pynput]
-    G --> J[macOSBackend Stub]
+    G --> J[MacOSBackend CoreGraphics ctypes/pynput]
 
     B --> K[cursortrack.export]
     K --> L[CSV Exporter]
@@ -90,3 +90,22 @@ Contributions implementing raw digitizer capture are welcome; see [CONTRIBUTING.
 **Threading.** `XInitThreads` is called before any other Xlib call so a single backend's display connection is safe to touch from both the recorder's sampling loop and the playback fail-safe polling.
 
 **Wayland scope.** On Wayland desktops, CursorTrack connects to the XWayland compatibility server. Position reads, warps, and injected clicks work within the XWayland coordinate space, and capture hooks see events routed to X11 clients. What is *not* possible — for any unprivileged process, by compositor design — is globally capturing input delivered to native Wayland clients or injecting input into them. First-class native Wayland support would require the `org.freedesktop.portal.RemoteDesktop` portal (interactive permission prompts) or raw `/dev/input` access (root/`input` group); both are tracked in [ROADMAP.md](../ROADMAP.md).
+
+---
+
+## 6. macOS (CoreGraphics) Notes
+
+`MacOSBackend` mirrors the Linux/Windows backends' dependency-free design: it drives the OS directly through `ctypes` against `CoreGraphics`, `CoreFoundation`, and `ApplicationServices` (no `pyobjc` needed for emulation or position reads), and reuses `pynput` for global click/scroll capture hooks. `pynput` itself pulls in `pyobjc` transitively on macOS to implement that capture hook — this is unavoidable, since macOS event taps are only exposed through Objective-C-bridged APIs (`Quartz.CGEventTapCreate` et al.), unlike X11/Win32 which have plain C entry points.
+
+**How each operation maps to CoreGraphics:**
+- `read_position()` → `CGEventCreate(NULL)` + `CGEventGetLocation`, then `CFRelease` the throwaway event.
+- `set_position(x, y)` → `CGEventCreateMouseEvent(..., kCGEventMouseMoved, ...)` + `CGEventPost(kCGHIDEventTap, ...)`. This posts a move event rather than calling `CGWarpMouseCursorPosition`, so other applications observe the motion the same way they would a real mouse move — matching `XWarpPointer`/`SetCursorPos`'s visible-to-apps semantics on Linux/Windows.
+- `get_screen_size()` → `CGMainDisplayID()` + `CGDisplayPixelsWide`/`CGDisplayPixelsHigh`. **Main display only** — unlike the Windows backend, which reports the full virtual desktop; multi-display parity (e.g. via `CGGetActiveDisplayList` union bounds) is tracked in [ROADMAP.md](../ROADMAP.md). The main display's origin is `(0, 0)` in the global CoreGraphics coordinate space, so the inherited `get_screen_bounds()` default of `(0, 0, w, h)` is correct for the display it does cover.
+- `click(button, pressed)` → `CGEventCreateMouseEvent` at the *current* cursor position (read via the same path as `read_position()`) with `kCGEventLeftMouseDown/Up`, `kCGEventRightMouseDown/Up`, or `kCGEventOtherMouseDown/Up` (button numbers 2/3/4 for middle/x1/x2) + `CGEventPost`. Unknown button names are a no-op — the same deliberate policy as Linux/Windows; substituting a left click would perform a real, unrecorded action.
+- `scroll(sdx, sdy)` → `CGEventCreateScrollWheelEvent(NULL, kCGScrollEventUnitLine, 2, sdy, sdx)` + `CGEventPost`. Note the parameter order: `wheel1` is the *vertical* delta and `wheel2` is *horizontal*, not `(x, y)` order — verified against `pynput`'s own Darwin mouse controller, which passes `(dy, dx)` into the same two slots.
+
+**Accessibility permission is required for both emulation and capture, and failures are silent.** Every `CGEventPost` call above is a no-op — no exception, no return code to check — unless the process has been granted Accessibility permission (System Settings → Privacy & Security → Accessibility). The same permission gates whether `pynput`'s Quartz event tap ever receives events at all. `MacOSBackend.__init__` probes `AXIsProcessTrusted()` and prints a `stderr` warning (not an error) when it's missing, since `read_position()`/`get_screen_size()` still work fine without it — only emulation and capture are affected. `cursortrack doctor` surfaces the same check.
+
+**CI implication: real emulation/capture cannot be tested on GitHub-hosted macOS runners.** GitHub's `macos-latest` runners do not, and cannot, grant Accessibility permission to the CI process (there is no UI session to click "Allow" in, and no known headless grant mechanism). `test-macos` in CI therefore only exercises what works unconditionally — import, backend construction, framework/prototype declaration, `read_position()`, `get_screen_size()`, and the pure-Python unknown-button no-op/button-mapping logic (verified with a mocked CoreGraphics, which also runs on Linux/Windows dev machines) — while `set_position`/`click`/`scroll` round-trips and `pynput` hook delivery tests skip themselves via an `AXIsProcessTrusted()` guard. This mirrors, in spirit, why raw digitizer capture was deferred on Windows (§4): the untestable subsystem is scoped narrowly and documented rather than silently assumed to work.
+
+**Known capture limitation: x1/x2 side buttons are indistinguishable from a middle click.** `pynput`'s macOS listener (`pynput.mouse._darwin.Button`) only defines three named buttons — `left`, `middle`, `right` — and dispatches purely on Quartz's `CGEventType` (`kCGEventOtherMouseDown`/`Up` for anything that isn't left/right), without reading `kCGMouseEventButtonNumber` to tell button 2 apart from button 3 or 4. This means a physical x1/x2 side-button press is recorded as `button.name == "middle"`, indistinguishable from an actual middle-click, as of `pynput` 1.8.2 (the latest release at the time this backend was written). This only affects **recording** — `MacOSBackend.click()` still emulates x1/x2 correctly during **playback**, since that path talks to `CGEventCreateMouseEvent` directly with explicit button numbers 3/4 and never goes through `pynput`. `PYNPUT_BUTTON_ALIASES` in `macos.py` exists as a forward-compatible no-op (mirroring Linux's `button8`/`button9` → `x1`/`x2` aliasing) in case a future `pynput` release starts disambiguating; it does nothing today.
