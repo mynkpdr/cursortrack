@@ -32,6 +32,13 @@ def zigzag_decode(u: int) -> int:
 
 def write_uvarint(buf: bytearray, u: int) -> None:
     """Encode an unsigned integer into varint representation and append to buf."""
+    if u < 0:
+        # Without this guard the loop never terminates: >> on a negative int
+        # converges to -1, appending continuation bytes forever.
+        raise ValueError(
+            f"write_uvarint requires a non-negative integer (got {u}); "
+            "use write_svarint for signed values."
+        )
     while True:
         b = u & 0x7F
         u >>= 7

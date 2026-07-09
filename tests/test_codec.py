@@ -5,6 +5,8 @@ from __future__ import annotations
 import io
 import sys
 
+import pytest
+
 from cursortrack.core.codec import (
     CODEC_RAW,
     CODEC_ZLIB,
@@ -53,6 +55,18 @@ def test_svarint_roundtrip() -> None:
         assert ok
         assert decoded == val
         assert pos == len(buf)
+
+
+def test_write_uvarint_rejects_negative_input() -> None:
+    """Negative input must raise instead of looping forever appending bytes.
+
+    Regression test: >>= on a negative Python int converges to -1 rather than
+    0, so the encoder loop never terminated and grew the buffer unboundedly.
+    """
+    buf = bytearray()
+    with pytest.raises(ValueError, match="non-negative"):
+        write_uvarint(buf, -1)
+    assert buf == bytearray()  # nothing partially appended
 
 
 def test_truncated_varint() -> None:
