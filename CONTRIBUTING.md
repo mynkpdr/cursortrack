@@ -47,7 +47,7 @@ Create or modify the backend file, e.g. `cursortrack/backends/macos.py` (the Win
 
 ### Step 2: Update Package Requirements
 If your backend introduces new platform-specific libraries:
-1. Add them as optional dependencies in `pyproject.toml` (e.g. `linux = ["pynput>=1.8.0"]` or `macos = ["pyobjc-framework-Quartz"]`).
+1. Add them as optional dependencies in `pyproject.toml` (e.g. `linux = ["pynput>=1.8.0"]`). Prefer `ctypes` against system frameworks/libraries over a dedicated wrapper package where possible — see `cursortrack/backends/macos.py`, which drives CoreGraphics directly instead of depending on `pyobjc-framework-Quartz`; `pynput` still pulls in `pyobjc` transitively on macOS for capture hooks, but emulation and position reads stay dependency-free.
 2. Make sure you don't import these dependencies globally in `cursortrack/backends/your_os.py` if doing so would break imports on other platforms (Windows, etc.). Use dynamic, runtime imports inside the listening/emulation methods.
 
 ### Step 3: Register the Backend Class

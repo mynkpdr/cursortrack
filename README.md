@@ -6,14 +6,14 @@
 
 **CursorTrack** is a professional, open-source, developer-friendly mouse and input tracking tool and Python library. It records mouse movements, clicks, scrolls, and touchpad gestures into a compact, delta-encoded, crash-safe binary format, and can play them back or export them to CSV, JSONL, NumPy (`.npy`), and Parquet formats for machine learning pipelines.
 
-v0.2 provides a first-class, dependency-free experience on **Windows** (native Win32 APIs via `ctypes`) and **Linux** (X11/XTest via `ctypes`, including XWayland sessions), with an OS-abstracted backend architecture designed for a seamless macOS addition.
+CursorTrack provides a first-class, dependency-free experience on **Windows** (native Win32 APIs via `ctypes`), **Linux** (X11/XTest via `ctypes`, including XWayland sessions), and **macOS** (CoreGraphics via `ctypes`, requires Accessibility permission — see [Known Limitations](#known-limitations-v030)), with a shared OS-abstracted backend architecture.
 
 ---
 
 ## Features
 
 - **🟢 High-Fidelity Recording**: Sample cursor movements (up to 240+ Hz), mouse buttons (press/release), scrolls (vertical + horizontal), and touchpad gestures.
-- **⚡ Dependency-Free Playback**: Emulate mouse coordinates and clicks natively on Windows (Win32) and Linux (X11/XTest) via ctypes — zero packages required to replay or capture position.
+- **⚡ Dependency-Free Playback**: Emulate mouse coordinates and clicks natively on Windows (Win32), Linux (X11/XTest), and macOS (CoreGraphics) via ctypes — zero packages required to replay or capture position.
 - **🔒 Playback Fail-Safe**: Instantly abort an active replay by moving your mouse manually into **any corner** of the screen or pressing the **Esc** key globally.
 - **📦 Crash-Safe Stream**: Buffers flush and `fsync` periodically to disk so that recordings are fully readable even if the script is abruptly killed.
 - **📊 Scientific Exporters**: Output tracks directly to CSV, JSON Lines, NumPy `.npy` arrays, or Parquet for analysis, training, and simulation in ML pipelines.
@@ -32,6 +32,7 @@ pip install .
 # Install with click/scroll/touch capture support (requires pynput)
 pip install .[windows]   # on Windows
 pip install .[linux]     # on Linux
+pip install .[macos]     # on macOS
 
 # Install with zstd compression support
 pip install .[zstd]
@@ -44,9 +45,11 @@ pip install .[dev,zstd,ml]
 ```
 
 > [!NOTE]
-> `pip install .` alone gives you movement-only recording and full playback/export — both use dependency-free `ctypes` calls (Win32 on Windows, X11/XTest on Linux). Recording **clicks, scrolls, or touch gestures** additionally requires `pynput`, installed via the `[windows]` or `[linux]` extra.
+> `pip install .` alone gives you movement-only recording and full playback/export — all three platforms use dependency-free `ctypes` calls (Win32 on Windows, X11/XTest on Linux, CoreGraphics on macOS). Recording **clicks, scrolls, or touch gestures** additionally requires `pynput`, installed via the `[windows]`, `[linux]`, or `[macos]` extra.
 >
 > On Linux, CursorTrack talks to the X server, so it needs the standard X11 client libraries (`libX11` and `libXtst`, preinstalled on virtually every desktop distribution) and a running X11 or XWayland session (`DISPLAY` set). On headless machines, wrap commands with `xvfb-run`.
+>
+> On macOS, CursorTrack requires **Accessibility permission** (System Settings → Privacy & Security → Accessibility) for both cursor emulation (`play`) and click/scroll capture (`record --capture click,scroll,touch`). Without it, CoreGraphics silently drops injected events and `pynput`'s hooks never fire — no error is raised. Run `cursortrack doctor` to check whether it's granted.
 
 ---
 
@@ -117,8 +120,11 @@ print(df.head())
 
 ---
 
-## Known Limitations (v0.2.0)
+## Known Limitations (v0.3.0)
 
+- **macOS requires Accessibility permission for both emulation and capture.** Grant it under System Settings → Privacy & Security → Accessibility, or `set_position`/`click`/`scroll` silently do nothing and `record --capture click,scroll,touch` silently captures nothing — CoreGraphics and `pynput` raise no error either way. `read_position`/`get_screen_size` work without it. Run `cursortrack doctor` to check. See [docs/architecture.md](docs/architecture.md#6-macos-coregraphics-notes) for details.
+- **macOS side-button (x1/x2) clicks cannot be captured with their own identity.** `pynput`'s macOS listener reports every non-left/right button press as `"middle"`, since it does not disambiguate `kCGEventOtherMouseDown/Up` by button number. This only affects *recording*; `play` still emulates x1/x2 correctly since that path talks to CoreGraphics directly. See [docs/architecture.md](docs/architecture.md#6-macos-coregraphics-notes).
+- **`get_screen_size()` reports only the main display on macOS** (Windows covers the full virtual desktop; Linux's `XDisplayWidth`/`Height` covers the default screen). Fail-safe corners on a secondary macOS display are therefore not detected; multi-display parity is tracked in [ROADMAP.md](ROADMAP.md).
 - **Native Wayland windows are out of reach on Linux.** The Linux backend connects through X11, which also covers XWayland windows on Wayland desktops. However, events delivered to *native* Wayland clients cannot be globally captured, and emulation targeting them is blocked by the compositor's sandboxing — this applies to every unprivileged tool, not just CursorTrack. Pure X11 sessions have no such restriction. See [docs/architecture.md](docs/architecture.md#5-linux-x11wayland-notes) for details.
 - **Multi-finger touchpad gestures** (pinch-to-zoom, rotate, 3-finger app-switch, 4-finger virtual-desktop-switch) cannot be captured. Windows reserves these for its own shell-level gesture handling and never exposes them to background apps through any API — this isn't something CursorTrack (or any equivalent tool) can work around.
 - **Two-finger scroll may not be captured on some touchpads**, even with `--capture scroll` or `all` and `pynput` installed. Physical/USB mouse wheel scrolling is unaffected and always captured. See [docs/architecture.md](docs/architecture.md#4-touchpad-gesture-capture-limitations) for why.
