@@ -97,6 +97,12 @@ def play(
         console.print("[yellow]Recording contains no events. Nothing to play.[/yellow]")
         return
 
+    if session.truncated and not quiet:
+        console.print(
+            "[bold yellow]Warning:[/bold yellow] recording stopped decoding early "
+            "(truncated or corrupt tail) — playing back only the recovered events."
+        )
+
     # Initialize backend
     try:
         backend = get_backend(backend_name)

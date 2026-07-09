@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import struct
 
+from cursortrack.core.codec import CODEC_RAW, write_uvarint
 from cursortrack.core.events import (
     ButtonEvent,
     InputEvent,
     MoveEvent,
     ScrollEvent,
     TapEvent,
+    decode_events_v2,
+    encode_click,
+    encode_move,
 )
 from cursortrack.core.format import (
     HEADER_FMT_V1,
@@ -137,3 +141,80 @@ def test_to_dataframe_conversion() -> None:
     assert df.loc[3, "sdy"] == -1
     assert df.loc[4, "type"] == "tap"
     assert df.loc[4, "touch_id"] == 0
+
+
+def _write_v2_file(path: str, body: bytes) -> None:
+    """Write a minimal raw-codec v2 binary file (header + uncompressed body)."""
+    header = pack_header(
+        codec=CODEC_RAW, rate=144, scr_w=1920, scr_h=1080, start=1000.0, x0=100, y0=200, capture=15
+    )
+    with open(path, "wb") as f:
+        f.write(header + body)
+
+
+def test_load_binary_intact_roundtrip_is_not_truncated(tmp_path) -> None:
+    """A clean, fully-decodable body must report truncated=False."""
+    buf = bytearray()
+    encode_move(buf, 1, 5, 5)
+    encode_click(buf, 1, True, 0, 0, 0)
+    path = tmp_path / "intact.ctrk"
+    _write_v2_file(str(path), bytes(buf))
+
+    session = Session.load(str(path))
+    assert session.truncated is False
+    assert len(session.events) == 3  # implicit frame-0 move + the two encoded events
+
+
+def test_load_binary_truncated_file_sets_session_flag(tmp_path) -> None:
+    """End-to-end: Session.load on a half-written file must surface truncated=True."""
+    buf = bytearray()
+    encode_move(buf, 1, 5, 5)
+    buf.append(0x80)  # incomplete trailing varint, as if the writer was killed mid-flush
+    path = tmp_path / "half_recovered.ctrk"
+    _write_v2_file(str(path), bytes(buf))
+
+    session = Session.load(str(path))
+    assert session.truncated is True
+    assert len(session.events) == 2  # implicit frame-0 move + the one complete move
+
+
+def test_load_binary_mid_varint_truncation_keeps_partial_events() -> None:
+    """A body cut off mid-varint must decode everything before it and flag truncated."""
+    buf = bytearray()
+    encode_move(buf, 1, 5, 5)
+    encode_move(buf, 1, 10, 10)
+    buf.append(0x80)  # continuation bit set, but no terminating byte follows
+
+    events, truncated = decode_events_v2(100, 200, bytes(buf))
+    assert truncated is True
+    assert len(events) == 3  # implicit frame-0 move + the two complete moves
+
+
+def test_load_binary_unknown_tag_truncation_stops_and_flags() -> None:
+    """An unrecognized tag must stop decoding (ignoring any trailing bytes) and flag truncated."""
+    buf = bytearray()
+    encode_move(buf, 1, 5, 5)
+    write_uvarint(buf, 99)  # unknown tag
+    write_uvarint(buf, 1)  # dframes
+    buf += b"\x01\x02\x03"  # trailing bytes that must never be consumed as a new event
+
+    events, truncated = decode_events_v2(100, 200, bytes(buf))
+    assert truncated is True
+    assert len(events) == 2  # implicit frame-0 move + the one complete move
+
+
+def test_session_default_truncated_is_false() -> None:
+    """Constructing a Session directly (no decoder involved) must default to untruncated."""
+    header = {
+        "version": 2,
+        "codec": 0,
+        "rate": 100,
+        "scr_w": 1920,
+        "scr_h": 1080,
+        "start": 1000.0,
+        "x0": 0,
+        "y0": 0,
+        "capture": 15,
+    }
+    session = Session(header, [MoveEvent(frame=0, x=0, y=0)])
+    assert session.truncated is False

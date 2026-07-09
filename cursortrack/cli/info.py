@@ -34,6 +34,12 @@ def info(
         console.print(f"[bold red]Error decoding recording file:[/bold red] {e}")
         raise typer.Exit(code=1)
 
+    if session.truncated:
+        console.print(
+            "[bold yellow]Warning:[/bold yellow] recording stopped decoding early "
+            "(truncated or corrupt tail) — some events may be missing."
+        )
+
     counts: dict[str, int] = {"move": 0, "down": 0, "up": 0, "scroll": 0, "tap": 0}
     min_x = min_y = 10**9
     max_x = max_y = -(10**9)

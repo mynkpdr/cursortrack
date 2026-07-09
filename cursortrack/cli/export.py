@@ -58,6 +58,11 @@ def export(
 
     try:
         session = Session.load(file)
+        if session.truncated:
+            console.print(
+                "[bold yellow]Warning:[/bold yellow] recording stopped decoding early "
+                "(truncated or corrupt tail) — exporting only the recovered events."
+            )
         count = export_session(session, out_path, fmt)
         console.print(
             f"[bold green]✔ Export complete![/bold green] Wrote {count} events to {out_path}."

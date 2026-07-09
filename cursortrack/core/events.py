@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Generator
 from dataclasses import dataclass
 from enum import IntEnum
 
@@ -149,29 +149,39 @@ def encode_tap(buf: bytearray, dframes: int, touch_id: int, dx: int, dy: int) ->
     write_svarint(buf, dy)
 
 
-def iter_events_v2(x0: int, y0: int, body: bytes) -> Iterator[InputEvent]:
-    """Yield typed InputEvent objects from a v2 binary stream body."""
+def iter_events_v2(x0: int, y0: int, body: bytes) -> Generator[InputEvent, None, bool]:
+    """Yield typed InputEvent objects from a v2 binary stream body.
+
+    On early stop (truncated varint or unknown tag), the generator's
+    ``StopIteration.value`` is set to ``True``; callers that need that signal
+    should use `decode_events_v2` instead of driving this generator directly.
+    """
     pos = 0
     n = len(body)
     x, y = x0, y0
     frame = 0
     yield MoveEvent(frame=0, x=x, y=y)
 
+    truncated = False
     while pos < n:
         tag, pos, ok = read_uvarint(body, pos)
         if not ok:
+            truncated = True
             break
         dframes, pos, ok = read_uvarint(body, pos)
         if not ok:
+            truncated = True
             break
         frame += dframes
 
         if tag == EventTag.MOVE:
             dx, pos, ok = read_svarint(body, pos)
             if not ok:
+                truncated = True
                 break
             dy, pos, ok = read_svarint(body, pos)
             if not ok:
+                truncated = True
                 break
             x += dx
             y += dy
@@ -180,12 +190,15 @@ def iter_events_v2(x0: int, y0: int, body: bytes) -> Iterator[InputEvent]:
         elif tag in (EventTag.DOWN, EventTag.UP):
             button, pos, ok = read_uvarint(body, pos)
             if not ok:
+                truncated = True
                 break
             dx, pos, ok = read_svarint(body, pos)
             if not ok:
+                truncated = True
                 break
             dy, pos, ok = read_svarint(body, pos)
             if not ok:
+                truncated = True
                 break
             x += dx
             y += dy
@@ -197,15 +210,19 @@ def iter_events_v2(x0: int, y0: int, body: bytes) -> Iterator[InputEvent]:
         elif tag == EventTag.SCROLL:
             sdx, pos, ok = read_svarint(body, pos)
             if not ok:
+                truncated = True
                 break
             sdy, pos, ok = read_svarint(body, pos)
             if not ok:
+                truncated = True
                 break
             dx, pos, ok = read_svarint(body, pos)
             if not ok:
+                truncated = True
                 break
             dy, pos, ok = read_svarint(body, pos)
             if not ok:
+                truncated = True
                 break
             x += dx
             y += dy
@@ -214,23 +231,50 @@ def iter_events_v2(x0: int, y0: int, body: bytes) -> Iterator[InputEvent]:
         elif tag == EventTag.TAP:
             touch_id, pos, ok = read_uvarint(body, pos)
             if not ok:
+                truncated = True
                 break
             dx, pos, ok = read_svarint(body, pos)
             if not ok:
+                truncated = True
                 break
             dy, pos, ok = read_svarint(body, pos)
             if not ok:
+                truncated = True
                 break
             x += dx
             y += dy
             yield TapEvent(frame=frame, x=x, y=y, touch_id=touch_id)
         else:
             # Unknown tag - stop parsing to prevent corruption propagation
+            truncated = True
             break
+    return truncated
 
 
-def iter_positions_v1(x0: int, y0: int, body: bytes) -> Iterator[MoveEvent]:
-    """Yield MoveEvent objects from a legacy v1 (move-only) binary stream body."""
+def decode_events_v2(x0: int, y0: int, body: bytes) -> tuple[list[InputEvent], bool]:
+    """Decode a v2 binary stream body into a list, reporting whether it stopped early.
+
+    Returns:
+        (events, truncated) where truncated is True if decoding hit a
+        truncated varint or an unknown tag before consuming the whole body.
+    """
+    gen = iter_events_v2(x0, y0, body)
+    events: list[InputEvent] = []
+    truncated = False
+    try:
+        while True:
+            events.append(next(gen))
+    except StopIteration as stop:
+        truncated = bool(stop.value)
+    return events, truncated
+
+
+def iter_positions_v1(x0: int, y0: int, body: bytes) -> Generator[MoveEvent, None, bool]:
+    """Yield MoveEvent objects from a legacy v1 (move-only) binary stream body.
+
+    On early stop (truncated varint), the generator's ``StopIteration.value``
+    is set to ``True``; see `decode_positions_v1` to consume that signal.
+    """
     yield MoveEvent(frame=0, x=x0, y=y0)
     pos = 0
     x, y = x0, y0
@@ -239,11 +283,30 @@ def iter_positions_v1(x0: int, y0: int, body: bytes) -> Iterator[MoveEvent]:
     while pos < n:
         u, pos, ok = read_uvarint(body, pos)
         if not ok:
-            break
+            return True
         v, pos, ok = read_uvarint(body, pos)
         if not ok:
-            break
+            return True
         x += zigzag_decode(u)
         y += zigzag_decode(v)
         frame += 1
         yield MoveEvent(frame=frame, x=x, y=y)
+    return False
+
+
+def decode_positions_v1(x0: int, y0: int, body: bytes) -> tuple[list[InputEvent], bool]:
+    """Decode a legacy v1 binary stream body into a list, reporting whether it stopped early.
+
+    Returns:
+        (events, truncated) where truncated is True if decoding hit a
+        truncated varint before consuming the whole body.
+    """
+    gen = iter_positions_v1(x0, y0, body)
+    events: list[InputEvent] = []
+    truncated = False
+    try:
+        while True:
+            events.append(next(gen))
+    except StopIteration as stop:
+        truncated = bool(stop.value)
+    return events, truncated
