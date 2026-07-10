@@ -65,6 +65,22 @@ class CornerAbortBackend(InputBackend):
         pass
 
 
+class MoveCountCornerAbortBackend(CornerAbortBackend):
+    """Report a corner after playback has injected a configured number of moves."""
+
+    trigger_after_moves: ClassVar[int] = 0
+    moves: ClassVar[int] = 0
+
+    def read_position(self) -> tuple[int, int]:
+        if type(self).moves >= type(self).trigger_after_moves:
+            return (0, 0)
+        return self.pos
+
+    def set_position(self, x: int, y: int) -> None:
+        super().set_position(x, y)
+        type(self).moves += 1
+
+
 class MoveOrderBackend(InputBackend):
     """Mock backend that logs each cursor move, for asserting call ordering vs. sleeps."""
 
@@ -850,9 +866,12 @@ def test_play_loop_runs_multiple_passes_before_failsafe_stops_it() -> None:
         assert record_res.exit_code == 0
 
         events_per_pass = len(Session.load(session_file).events)
-        # Let one full pass complete normally, then force a corner abort early in the second pass.
-        CornerAbortBackend.trigger_after = events_per_pass + 1
-        BACKEND_CLASSES["mock"] = CornerAbortBackend
+        # Let one full pass complete normally, then force a corner abort at the
+        # start of the second. This keys off injected moves rather than safety
+        # poll count, which legitimately varies with event timing.
+        MoveCountCornerAbortBackend.trigger_after_moves = events_per_pass
+        MoveCountCornerAbortBackend.moves = 0
+        BACKEND_CLASSES["mock"] = MoveCountCornerAbortBackend
 
         play_res = runner.invoke(
             app,
