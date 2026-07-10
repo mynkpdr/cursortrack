@@ -17,6 +17,8 @@ from cursortrack.core.codec import (
 from cursortrack.core.events import (
     BUTTON_ID,
     BUTTON_NAME,
+    CAP_CLICK,
+    CAP_SCROLL,
     DEFAULT_MAX_ABS_COORDINATE,
     DEFAULT_MAX_EVENTS,
     DEFAULT_MAX_FRAME,
@@ -29,6 +31,14 @@ from cursortrack.core.events import (
     decode_positions_v1,
 )
 from cursortrack.core.format import read_header
+from cursortrack.core.layout import (
+    CoordinateUnit,
+    DesktopLayout,
+    InputCapabilities,
+    MonitorLayout,
+    Rect,
+    ScrollUnit,
+)
 
 DEFAULT_MAX_COMPRESSED_BYTES = 256 * 1024 * 1024
 
@@ -142,6 +152,90 @@ class Session:
     @property
     def capture_mask(self) -> int:
         return int(self.header.get("capture", 1))
+
+    @property
+    def layout_metadata_sufficient(self) -> bool:
+        """True when the session carries portable layout facts (v3+).
+
+        v1/v2 only store primary/virtual width and height without origin, unit,
+        or monitor topology, which is insufficient for safe cross-machine replay.
+        """
+        return self.version >= 3 and bool(self.header.get("desktop"))
+
+    @property
+    def button_state_valid(self) -> bool:
+        """Whether button press/release pairs form a valid playback sequence."""
+        pressed: set[str] = set()
+        for event in self.events:
+            if not isinstance(event, ButtonEvent):
+                continue
+            if event.pressed:
+                if event.button in pressed:
+                    return False
+                pressed.add(event.button)
+            else:
+                if event.button not in pressed:
+                    return False
+                pressed.discard(event.button)
+        return not pressed
+
+    def source_layout(self) -> DesktopLayout:
+        """Best-effort source desktop layout for playback negotiation.
+
+        v3 sessions expose stored desktop metadata. v1/v2 synthesize a single
+        primary monitor from ``scr_w``/``scr_h`` when both are positive, with an
+        unknown coordinate unit; otherwise the layout is explicitly unknown.
+        """
+        desktop = self.header.get("desktop")
+        if isinstance(desktop, DesktopLayout):
+            return desktop
+
+        width = self.screen_width
+        height = self.screen_height
+        if width > 0 and height > 0:
+            bounds = Rect(0, 0, width, height)
+            return DesktopLayout(
+                known=True,
+                coordinate_unit=CoordinateUnit.UNKNOWN,
+                bounds=bounds,
+                monitors=(MonitorLayout(id="legacy-primary", primary=True, bounds=bounds),),
+            )
+        return DesktopLayout.unknown()
+
+    def source_capabilities(self) -> InputCapabilities:
+        """Infer source input capabilities from metadata and observed events."""
+        caps = self.header.get("input")
+        if isinstance(caps, InputCapabilities):
+            return caps
+
+        buttons: list[str] = []
+        seen: set[str] = set()
+        has_scroll = False
+        for event in self.events:
+            if isinstance(event, ButtonEvent) and event.button not in seen:
+                seen.add(event.button)
+            elif isinstance(event, ScrollEvent):
+                has_scroll = True
+            elif isinstance(event, TapEvent) and "left" not in seen:
+                seen.add("left")
+        for name in ("left", "right", "middle", "x1", "x2"):
+            if name in seen:
+                buttons.append(name)
+
+        # Capture mask is a request, not a guarantee; still useful as a hint.
+        mask = self.capture_mask
+        return InputCapabilities(
+            coordinate_unit=CoordinateUnit.UNKNOWN,
+            buttons=tuple(buttons),
+            scroll_units=(ScrollUnit.WHEEL_DETENT,) if has_scroll or (mask & CAP_SCROLL) else (),
+            precise_scroll=False,
+            read_position=True,
+            inject_position=True,
+            inject_buttons=bool(buttons) or bool(mask & CAP_CLICK),
+            inject_scroll=has_scroll or bool(mask & CAP_SCROLL),
+            capture_buttons=bool(mask & CAP_CLICK),
+            capture_scroll=bool(mask & CAP_SCROLL),
+        )
 
     @classmethod
     def load(cls, path: str, limits: DecodeLimits | None = None) -> Session:

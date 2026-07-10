@@ -13,17 +13,17 @@ import pytest
 from typer.testing import CliRunner
 
 from cursortrack.backends import BACKEND_CLASSES
-from cursortrack.backends.base import InputBackend
 from cursortrack.cli.app import app
 from cursortrack.core.codec import CODEC_RAW
 from cursortrack.core.events import CAP_CLICK, CAP_MOVE, CAP_SCROLL, ButtonEvent, encode_click
 from cursortrack.core.format import pack_header
 from cursortrack.core.session import Session
+from tests.conftest import MockBackend
 
 runner = CliRunner()
 
 
-class CornerAbortBackend(InputBackend):
+class CornerAbortBackend(MockBackend):
     """Mock backend whose reported position becomes a screen corner after N reads.
 
     Used to deterministically exercise the playback fail-safe (which normally
@@ -36,7 +36,7 @@ class CornerAbortBackend(InputBackend):
     trigger_after = 0
 
     def __init__(self) -> None:
-        self.pos = (500, 500)
+        super().__init__()
         self.reads = 0
 
     def read_position(self) -> tuple[int, int]:
@@ -44,12 +44,6 @@ class CornerAbortBackend(InputBackend):
         if self.reads > type(self).trigger_after:
             return (0, 0)
         return self.pos
-
-    def set_position(self, x: int, y: int) -> None:
-        self.pos = (x, y)
-
-    def get_screen_size(self) -> tuple[int, int]:
-        return (1920, 1080)
 
     def click(self, button: str, pressed: bool) -> None:
         pass
@@ -82,24 +76,15 @@ class MoveCountCornerAbortBackend(CornerAbortBackend):
         type(self).moves += 1
 
 
-class MoveOrderBackend(InputBackend):
+class MoveOrderBackend(MockBackend):
     """Mock backend that logs each cursor move, for asserting call ordering vs. sleeps."""
 
     #: Shared log of "move" entries, reset by each test before use.
     log: ClassVar[list[str]] = []
 
-    def __init__(self) -> None:
-        self.pos = (500, 500)
-
-    def read_position(self) -> tuple[int, int]:
-        return self.pos
-
     def set_position(self, x: int, y: int) -> None:
         type(self).log.append("move")
         self.pos = (x, y)
-
-    def get_screen_size(self) -> tuple[int, int]:
-        return (1920, 1080)
 
     def click(self, button: str, pressed: bool) -> None:
         pass
@@ -116,7 +101,7 @@ class MoveOrderBackend(InputBackend):
         pass
 
 
-class AheadOfTickClickBackend(InputBackend):
+class AheadOfTickClickBackend(MockBackend):
     """Mock backend that injects clicks stamped far ahead of the sampling tick.
 
     Emulates a recording loop that fell behind wall-clock time: the click
@@ -130,8 +115,8 @@ class AheadOfTickClickBackend(InputBackend):
     INJECT_ON_READS = (5, 15)
 
     def __init__(self) -> None:
+        super().__init__()
         self.reads = 0
-        self.callback: Callable[[str, tuple[Any, ...], float], None] | None = None
 
     def read_position(self) -> tuple[int, int]:
         self.reads += 1
@@ -143,9 +128,6 @@ class AheadOfTickClickBackend(InputBackend):
 
     def set_position(self, x: int, y: int) -> None:
         pass
-
-    def get_screen_size(self) -> tuple[int, int]:
-        return (1920, 1080)
 
     def click(self, button: str, pressed: bool) -> None:
         pass
@@ -162,12 +144,12 @@ class AheadOfTickClickBackend(InputBackend):
         self.callback = None
 
 
-class MixedButtonClickBackend(InputBackend):
+class MixedButtonClickBackend(MockBackend):
     """Mock backend that injects one x2 click pair and one unsupported-button pair."""
 
     def __init__(self) -> None:
+        super().__init__()
         self.reads = 0
-        self.callback: Callable[[str, tuple[Any, ...], float], None] | None = None
 
     def read_position(self) -> tuple[int, int]:
         self.reads += 1
@@ -182,9 +164,6 @@ class MixedButtonClickBackend(InputBackend):
     def set_position(self, x: int, y: int) -> None:
         pass
 
-    def get_screen_size(self) -> tuple[int, int]:
-        return (1920, 1080)
-
     def click(self, button: str, pressed: bool) -> None:
         pass
 
@@ -200,7 +179,7 @@ class MixedButtonClickBackend(InputBackend):
         self.callback = None
 
 
-class FailingSafetyBackend(InputBackend):
+class FailingSafetyBackend(MockBackend):
     """Backend whose fail-safe position sensor is unavailable."""
 
     moves: ClassVar[int] = 0
@@ -211,9 +190,6 @@ class FailingSafetyBackend(InputBackend):
     def set_position(self, x: int, y: int) -> None:
         del x, y
         type(self).moves += 1
-
-    def get_screen_size(self) -> tuple[int, int]:
-        return (1920, 1080)
 
     def click(self, button: str, pressed: bool) -> None:
         pass
@@ -230,14 +206,14 @@ class FailingSafetyBackend(InputBackend):
         pass
 
 
-class ButtonCornerAbortBackend(InputBackend):
+class ButtonCornerAbortBackend(MockBackend):
     """Track injected buttons and move to a corner after a configured read."""
 
     trigger_after: ClassVar[int] = 2
     clicks: ClassVar[list[tuple[str, bool]]] = []
 
     def __init__(self) -> None:
-        self.pos = (500, 500)
+        super().__init__()
         self.reads = 0
 
     def read_position(self) -> tuple[int, int]:
@@ -245,12 +221,6 @@ class ButtonCornerAbortBackend(InputBackend):
         if self.reads > type(self).trigger_after:
             return (0, 0)
         return self.pos
-
-    def set_position(self, x: int, y: int) -> None:
-        self.pos = (x, y)
-
-    def get_screen_size(self) -> tuple[int, int]:
-        return (1920, 1080)
 
     def click(self, button: str, pressed: bool) -> None:
         type(self).clicks.append((button, pressed))
@@ -267,12 +237,13 @@ class ButtonCornerAbortBackend(InputBackend):
         pass
 
 
-class MidRecordingFailureBackend(InputBackend):
+class MidRecordingFailureBackend(MockBackend):
     """Provide an initial position, then fail while the sampling loop is active."""
 
     fail_after_reads: ClassVar[int] = 3
 
     def __init__(self) -> None:
+        super().__init__()
         self.reads = 0
 
     def read_position(self) -> tuple[int, int]:
@@ -283,9 +254,6 @@ class MidRecordingFailureBackend(InputBackend):
 
     def set_position(self, x: int, y: int) -> None:
         pass
-
-    def get_screen_size(self) -> tuple[int, int]:
-        return (1920, 1080)
 
     def click(self, button: str, pressed: bool) -> None:
         pass
@@ -789,6 +757,77 @@ def test_play_prints_completion_message_only_on_success() -> None:
         )
         assert play_res.exit_code == 0
         assert "Playback complete" in play_res.output
+
+
+def test_play_dry_run_reports_compatibility_without_injection() -> None:
+    """--dry-run must exit 0 on a matching mock desktop and never claim playback."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        session_file = os.path.join(tmpdir, "session.ctrk")
+        record_res = runner.invoke(
+            app,
+            [
+                "record",
+                "-o",
+                session_file,
+                "--backend",
+                "mock",
+                "--hz",
+                "20",
+                "--seconds",
+                "0.2",
+                "--codec",
+                "raw",
+                "--no-spin",
+                "-q",
+            ],
+        )
+        assert record_res.exit_code == 0
+
+        play_res = runner.invoke(
+            app,
+            [
+                "play",
+                session_file,
+                "--backend",
+                "mock",
+                "--dry-run",
+                "--delay",
+                "0",
+            ],
+        )
+        assert play_res.exit_code == 0
+        assert "Dry-run complete" in play_res.output
+        assert "Playback compatibility" in play_res.output
+        assert "Playback complete" not in play_res.output
+
+
+def test_play_strict_refuses_mismatched_screen_size(tmp_path: object) -> None:
+    """Absolute mapping must refuse when recorded bounds differ from the target."""
+    from cursortrack.core.events import encode_move
+
+    path = os.path.join(str(tmp_path), "mismatch.ctrk")
+    body = bytearray()
+    encode_move(body, 0, 0, 0)
+    header = pack_header(
+        codec=CODEC_RAW,
+        rate=100,
+        scr_w=800,
+        scr_h=600,
+        start=1000.0,
+        x0=10,
+        y0=20,
+        capture=1,
+    )
+    with open(path, "wb") as f:
+        f.write(header + body)
+
+    play_res = runner.invoke(
+        app,
+        ["play", path, "--backend", "mock", "--delay", "0", "--dry-run"],
+    )
+    assert play_res.exit_code == 1
+    assert "Playback refused" in play_res.output
+    assert "layout-mismatch" in play_res.output
 
 
 def test_record_refuses_to_overwrite_existing_file_without_force() -> None:
@@ -1304,11 +1343,36 @@ def test_play_releases_unmatched_button_down_after_success(tmp_path: object) -> 
             "0",
             "--no-spin",
             "--quiet",
+            "--permissive",
         ],
     )
 
     assert result.exit_code == 0
     assert ButtonCornerAbortBackend.clicks == [("left", True), ("left", False)]
+
+
+def test_play_strict_refuses_unbalanced_button_state(tmp_path: object) -> None:
+    """Strict mode refuses sessions whose button press/release pairs do not balance."""
+    session_file = str(tmp_path) + "/unmatched-down-strict.ctrk"
+    _write_raw_button_session(session_file, gap_frames=0, include_up=False)
+    BACKEND_CLASSES["mock"] = ButtonCornerAbortBackend
+
+    result = runner.invoke(
+        app,
+        [
+            "play",
+            session_file,
+            "--backend",
+            "mock",
+            "--delay",
+            "0",
+            "--dry-run",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "button-state" in result.output
+    assert "Playback refused" in result.output
 
 
 def test_play_interrupts_long_wait_and_releases_button_on_corner(tmp_path: object) -> None:

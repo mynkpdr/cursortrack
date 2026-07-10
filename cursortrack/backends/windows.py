@@ -10,6 +10,14 @@ from typing import Any, Callable
 from cursortrack.backends._pynput_listener import verify_listener_running
 from cursortrack.backends.base import InputBackend
 from cursortrack.core.events import CAP_CLICK, CAP_SCROLL
+from cursortrack.core.layout import (
+    CoordinateUnit,
+    DesktopLayout,
+    InputCapabilities,
+    MonitorLayout,
+    Rect,
+    ScrollUnit,
+)
 
 # Win32 Mouse Constants
 MOUSEEVENTF_LEFTDOWN = 0x0002
@@ -96,7 +104,7 @@ def _declare_prototypes(user32: Any) -> None:
         user32.SetProcessDPIAware.argtypes = []
 
 
-def _enable_dpi_awareness(user32: Any) -> None:
+def _enable_dpi_awareness(user32: Any) -> bool:
     """Request per-monitor DPI awareness, falling back for older Windows.
 
     SetProcessDpiAwarenessContext requires Windows 10 1703+ and correctly
@@ -104,16 +112,21 @@ def _enable_dpi_awareness(user32: Any) -> None:
     call is otherwise rejected) fall back to the legacy, primary-monitor-only
     SetProcessDPIAware(), which is still strictly better than leaving DPI
     virtualization on and getting scaled coordinates.
+
+    Returns:
+        True only when per-monitor-v2 awareness was established and physical
+        coordinate metadata can be advertised with confidence.
     """
     try:
         if user32.SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2):
-            return
+            return True
     except (AttributeError, OSError):
         pass
     try:
         user32.SetProcessDPIAware()
     except Exception:
         pass
+    return False
 
 
 class WindowsBackend(InputBackend):
@@ -125,7 +138,7 @@ class WindowsBackend(InputBackend):
 
         self._user32 = ctypes.windll.user32
         _declare_prototypes(self._user32)
-        _enable_dpi_awareness(self._user32)
+        self._physical_coordinates_verified = _enable_dpi_awareness(self._user32)
 
         self._listener: Any | None = None
 
@@ -155,6 +168,39 @@ class WindowsBackend(InputBackend):
         origin_y = self._user32.GetSystemMetrics(SM_YVIRTUALSCREEN)
         width, height = self.get_screen_size()
         return int(origin_x), int(origin_y), width, height
+
+    def get_layout(self) -> DesktopLayout:
+        origin_x, origin_y, width, height = self.get_screen_bounds()
+        physical = getattr(self, "_physical_coordinates_verified", False)
+        coordinate_unit = CoordinateUnit.PHYSICAL_PIXEL if physical else CoordinateUnit.BACKEND_UNIT
+        coordinate_unit_id = None if physical else "win32-desktop-v1"
+        if width <= 0 or height <= 0:
+            return DesktopLayout.unknown(coordinate_unit, coordinate_unit_id)
+        bounds = Rect(origin_x, origin_y, width, height)
+        return DesktopLayout(
+            known=True,
+            coordinate_unit=coordinate_unit,
+            coordinate_unit_id=coordinate_unit_id,
+            bounds=bounds,
+            monitors=(MonitorLayout(id="virtual-desktop", primary=True, bounds=bounds),),
+        )
+
+    def get_capabilities(self) -> InputCapabilities:
+        layout = self.get_layout()
+        return InputCapabilities(
+            coordinate_unit=layout.coordinate_unit,
+            coordinate_unit_id=layout.coordinate_unit_id,
+            buttons=("left", "right", "middle", "x1", "x2"),
+            scroll_units=(ScrollUnit.WHEEL_DETENT,),
+            precise_scroll=False,
+            read_position=True,
+            inject_position=True,
+            inject_buttons=True,
+            inject_scroll=True,
+            capture_buttons=True,
+            capture_scroll=True,
+            restrictions=("interactive-desktop-only",),
+        )
 
     def click(self, button: str, pressed: bool) -> None:
         btn = button.lower()
