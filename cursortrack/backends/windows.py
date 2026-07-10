@@ -36,6 +36,7 @@ XBUTTON1 = 0x0001
 XBUTTON2 = 0x0002
 
 WHEEL_DELTA = 120
+INPUT_MOUSE = 0
 
 # GetSystemMetrics indices for the virtual desktop (the bounding box of *all*
 # monitors). Indices 0/1 (SM_CXSCREEN/SM_CYSCREEN) only cover the primary
@@ -58,6 +59,30 @@ class POINT(ctypes.Structure):
     _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
 
 
+class MOUSEINPUT(ctypes.Structure):
+    """Exact Win32 MOUSEINPUT layout on both 32- and 64-bit hosts."""
+
+    _fields_ = [
+        ("dx", ctypes.c_int32),
+        ("dy", ctypes.c_int32),
+        ("mouseData", ctypes.c_uint32),
+        ("dwFlags", ctypes.c_uint32),
+        ("time", ctypes.c_uint32),
+        ("dwExtraInfo", ctypes.c_size_t),
+    ]
+
+
+class _INPUTUNION(ctypes.Union):
+    _fields_ = [("mi", MOUSEINPUT)]  # noqa: RUF012 - ctypes requires a class-level schema
+
+
+class INPUT(ctypes.Structure):
+    """Win32 INPUT union containing the mouse event variant used here."""
+
+    _anonymous_ = ("value",)
+    _fields_ = [("type", ctypes.c_uint32), ("value", _INPUTUNION)]
+
+
 def _last_error() -> int | None:
     """Return the calling thread's last Win32 error code, or None off-Windows.
 
@@ -77,7 +102,7 @@ def _declare_prototypes(user32: Any) -> None:
     leave every call silently exposed to 32-/64-bit pointer truncation.
     """
     # Win32 BOOL is a typedef for int; c_int doubles as both here.
-    c_bool_ret, c_int, c_ulong = ctypes.c_int, ctypes.c_int, ctypes.c_ulong
+    c_bool_ret, c_int = ctypes.c_int, ctypes.c_int
     ptr = ctypes.POINTER
 
     user32.GetCursorPos.restype = c_bool_ret
@@ -89,9 +114,8 @@ def _declare_prototypes(user32: Any) -> None:
     user32.GetSystemMetrics.restype = c_int
     user32.GetSystemMetrics.argtypes = [c_int]
 
-    # DWORD dwFlags, dx, dy, dwData; ULONG_PTR dwExtraInfo (pointer-sized, hence c_void_p)
-    user32.mouse_event.restype = None
-    user32.mouse_event.argtypes = [c_ulong, c_ulong, c_ulong, c_ulong, ctypes.c_void_p]
+    user32.SendInput.restype = ctypes.c_uint32
+    user32.SendInput.argtypes = [ctypes.c_uint32, ptr(INPUT), c_int]
 
     if hasattr(user32, "SetProcessDpiAwarenessContext"):
         # BOOL SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT) - the
@@ -202,6 +226,21 @@ class WindowsBackend(InputBackend):
             restrictions=("interactive-desktop-only",),
         )
 
+    def _send_mouse_inputs(self, events: list[tuple[int, int]]) -> None:
+        """Inject checked mouse events, preserving signed wheel data as DWORD bits."""
+        inputs = (INPUT * len(events))()
+        for index, (flags, mouse_data) in enumerate(events):
+            inputs[index].type = INPUT_MOUSE
+            inputs[index].mi.mouseData = mouse_data & 0xFFFFFFFF
+            inputs[index].mi.dwFlags = flags
+
+        sent = self._user32.SendInput(len(inputs), inputs, ctypes.sizeof(INPUT))
+        if sent != len(inputs):
+            raise OSError(
+                f"SendInput injected {sent} of {len(inputs)} mouse events "
+                f"(error {_last_error()}); input may be blocked by Windows UIPI."
+            )
+
     def click(self, button: str, pressed: bool) -> None:
         btn = button.lower()
         data = 0
@@ -223,16 +262,16 @@ class WindowsBackend(InputBackend):
             # user never recorded.
             return
 
-        # Emulate click at current cursor position
-        self._user32.mouse_event(flags, 0, 0, data, 0)
+        self._send_mouse_inputs([(flags, data)])
 
     def scroll(self, sdx: int, sdy: int) -> None:
-        # vertical scroll
+        events: list[tuple[int, int]] = []
         if sdy != 0:
-            self._user32.mouse_event(MOUSEEVENTF_WHEEL, 0, 0, int(sdy * WHEEL_DELTA), 0)
-        # horizontal scroll
+            events.append((MOUSEEVENTF_WHEEL, int(sdy * WHEEL_DELTA)))
         if sdx != 0:
-            self._user32.mouse_event(MOUSEEVENTF_HWHEEL, 0, 0, int(sdx * WHEEL_DELTA), 0)
+            events.append((MOUSEEVENTF_HWHEEL, int(sdx * WHEEL_DELTA)))
+        if events:
+            self._send_mouse_inputs(events)
 
     def start_listening(
         self,
