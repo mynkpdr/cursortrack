@@ -12,7 +12,9 @@ from cursortrack.core.codec import (
     CODEC_ZLIB,
     CODEC_ZSTD,
     CodecWriter,
+    DecompressionStatus,
     decompress_tolerant,
+    decompress_with_status,
     read_svarint,
     read_uvarint,
     write_svarint,
@@ -69,11 +71,25 @@ def test_write_uvarint_rejects_negative_input() -> None:
     assert buf == bytearray()  # nothing partially appended
 
 
+def test_write_uvarint_rejects_values_above_uint64() -> None:
+    buf = bytearray()
+    with pytest.raises(ValueError, match="uint64"):
+        write_uvarint(buf, 1 << 64)
+    assert buf == bytearray()
+
+
 def test_truncated_varint() -> None:
     """Ensure truncated varint reads are detected as invalid."""
     buf = bytearray([0x80, 0x80])  # Continuation flag set but buffer ends
     _, _, ok = read_uvarint(buf, 0)
     assert not ok
+
+
+def test_overlong_uvarint_is_rejected() -> None:
+    """Malformed continuation chains must not consume an unbounded input prefix."""
+    buf = bytes([0x80] * 10 + [0x00])
+    with pytest.raises(ValueError, match="exceeds 10 bytes"):
+        read_uvarint(buf, 0)
 
 
 def test_compression_writer_and_tolerant_decompress() -> None:
@@ -113,6 +129,66 @@ def test_decompress_unfinalized_zlib() -> None:
     writer.close()
 
 
+def test_decompress_unfinalized_zlib_reports_truncation() -> None:
+    """A recoverable prefix still needs to report that its frame never finished."""
+    f = io.BytesIO()
+    writer = CodecWriter(f, CODEC_ZLIB, level=6)
+    writer.write(b"complete-event-boundary")
+    writer.flush()
+
+    result = decompress_with_status(f.getvalue(), CODEC_ZLIB)
+
+    assert result.data == b"complete-event-boundary"
+    assert result.status is DecompressionStatus.TRUNCATED
+    writer.close()
+
+
+def test_zlib_trailing_garbage_reports_corrupt_recovery() -> None:
+    import zlib
+
+    payload = b"valid payload"
+    result = decompress_with_status(zlib.compress(payload) + b"garbage", CODEC_ZLIB)
+
+    assert result.data == payload
+    assert result.status is DecompressionStatus.CORRUPT_RECOVERED
+
+
+def test_decompress_unfinalized_zstd_reports_truncation() -> None:
+    pytest.importorskip("zstandard")
+    f = io.BytesIO()
+    writer = CodecWriter(f, CODEC_ZSTD, level=3)
+    writer.write(b"complete-event-boundary")
+    writer.flush()
+
+    result = decompress_with_status(f.getvalue(), CODEC_ZSTD)
+
+    assert result.data == b"complete-event-boundary"
+    assert result.status is DecompressionStatus.TRUNCATED
+    writer.close()
+
+
+@pytest.mark.parametrize("codec", [CODEC_RAW, CODEC_ZLIB])
+def test_decompression_output_limit_is_enforced(codec: int) -> None:
+    payload = b"X" * 1000
+    if codec == CODEC_ZLIB:
+        import zlib
+
+        blob = zlib.compress(payload)
+    else:
+        blob = payload
+
+    with pytest.raises(ValueError, match="exceeds the configured limit"):
+        decompress_with_status(blob, codec, max_output_bytes=100)
+
+
+def test_zstd_decompression_output_limit_is_enforced() -> None:
+    zstd = pytest.importorskip("zstandard")
+    blob = zstd.ZstdCompressor().compress(b"X" * 1000)
+
+    with pytest.raises(ValueError, match="exceeds the configured limit"):
+        decompress_with_status(blob, CODEC_ZSTD, max_output_bytes=100)
+
+
 def test_decompress_corrupt_zlib_tail_recovers_prefix() -> None:
     """A corrupt byte near the end must not wipe the data decoded before it.
 
@@ -131,7 +207,9 @@ def test_decompress_corrupt_zlib_tail_recovers_prefix() -> None:
     blob = bytearray(f.getvalue())
     blob[-3] ^= 0xFF  # corrupt a byte near the end (past the flush boundary)
 
-    recovered = decompress_tolerant(bytes(blob), CODEC_ZLIB)
+    result = decompress_with_status(bytes(blob), CODEC_ZLIB)
+    recovered = result.data
     # Everything up to the last flush boundary must survive.
     assert len(recovered) >= len(payload)
     assert recovered[: len(payload)] == payload
+    assert result.status is DecompressionStatus.CORRUPT_RECOVERED
