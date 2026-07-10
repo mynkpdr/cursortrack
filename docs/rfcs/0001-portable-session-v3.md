@@ -1,6 +1,6 @@
 # RFC 0001: Portable Session Format v3
 
-- Status: Draft
+- Status: Accepted
 - Target milestone: v0.3.0
 - Tracking issue: #51
 - Compatibility: v1/v2 readers remain supported; v3 uses a new magic value
