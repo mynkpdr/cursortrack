@@ -27,6 +27,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with matching screen size still works under absolute mapping, with warnings about
   insufficient portable metadata.
 
+### Fixed
+- Compatibility preview now hard-fails unknown buttons and missing button-injection
+  support, reports backend restrictions, and catches mapped events outside known
+  target bounds before injection.
+- Windows labels coordinates as physical pixels only when per-monitor-v2 DPI
+  awareness was successfully established; otherwise it reports a backend unit.
+
 ## [0.2.2] - 2026-07-10
 
 A safety and data-integrity release. The v1/v2 on-disk layouts remain

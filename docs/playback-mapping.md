@@ -14,15 +14,19 @@ select a mapping mode if the source and target desktops are not equivalent.
 | `target-monitor` | Map a point relative to ``--source-monitor`` onto ``--target-monitor``. |
 
 Strict mode (default) refuses incompatible known layouts, missing target
-capabilities, invalid button state, and non-complete integrity. Use
-``--permissive`` only after reviewing the compatibility report.
+capabilities, unknown buttons, invalid button state, mapped points outside
+known target bounds, and non-complete integrity. Use ``--permissive`` only
+after reviewing the compatibility report; unknown buttons and missing
+injection capabilities remain hard failures.
 
 ## Capability checks
 
 Playback compares buttons, scroll units, and touch/tap presence against the
 target backend's ``InputCapabilities``. Current Windows/Linux backends advertise
 canonical mouse buttons and wheel-detent scroll. Tap events remain a legacy
-left-click approximation and are refused in strict mode.
+left-click approximation and are refused in strict mode. Backend restrictions
+such as ``interactive-desktop-only`` and ``xwayland-only`` are included in the
+report.
 
 ## Cases that remain impossible
 

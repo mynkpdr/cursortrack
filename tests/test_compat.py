@@ -153,3 +153,76 @@ def test_invalid_button_state_blocks_strict_playback() -> None:
     report = assess_playback(session, layout, caps, strict=True)
     assert not report.ok
     assert any(f.code == "button-state" for f in report.errors)
+
+
+def test_unknown_button_is_never_silently_treated_as_supported() -> None:
+    session = _session(
+        [
+            ButtonEvent(0, 1, 1, "button99", True),
+            ButtonEvent(1, 1, 1, "button99", False),
+        ]
+    )
+    layout, caps = _target()
+
+    report = assess_playback(session, layout, caps, strict=False)
+
+    assert not report.ok
+    assert any(f.code == "button-unknown" for f in report.errors)
+
+
+def test_button_events_require_injection_capability_not_just_names() -> None:
+    session = _session(
+        [
+            ButtonEvent(0, 1, 1, "left", True),
+            ButtonEvent(1, 1, 1, "left", False),
+        ]
+    )
+    layout, _ = _target()
+    caps = InputCapabilities(
+        coordinate_unit=CoordinateUnit.PHYSICAL_PIXEL,
+        buttons=("left",),
+        read_position=True,
+        inject_position=True,
+        inject_buttons=False,
+    )
+
+    report = assess_playback(session, layout, caps, strict=False)
+
+    assert not report.ok
+    assert any(f.code == "button-inject" for f in report.errors)
+
+
+def test_strict_refuses_mapped_points_outside_known_target() -> None:
+    session = _session([MoveEvent(0, 95, 50)], scr_w=100, scr_h=100)
+    layout, caps = _target(100, 100)
+    mapping = PlaybackMapping(mode=MappingMode.OFFSET, offset_x=10)
+
+    strict = assess_playback(session, layout, caps, mapping, strict=True)
+    assert not strict.ok
+    assert any(f.code == "mapped-outside-target" for f in strict.errors)
+
+    permissive = assess_playback(session, layout, caps, mapping, strict=False)
+    assert permissive.ok
+    assert any(f.code == "mapped-outside-target" for f in permissive.warnings)
+
+
+def test_target_restrictions_are_visible_in_compatibility_report() -> None:
+    session = _session([MoveEvent(0, 10, 20)])
+    layout, _ = _target()
+    caps = InputCapabilities(
+        coordinate_unit=CoordinateUnit.PHYSICAL_PIXEL,
+        buttons=("left",),
+        scroll_units=(ScrollUnit.WHEEL_DETENT,),
+        read_position=True,
+        inject_position=True,
+        inject_buttons=True,
+        inject_scroll=True,
+        restrictions=("interactive-desktop-only",),
+    )
+
+    report = assess_playback(session, layout, caps)
+
+    assert any(
+        finding.code == "target-restriction" and "interactive-desktop-only" in finding.message
+        for finding in report.warnings
+    )
