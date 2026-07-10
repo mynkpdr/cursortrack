@@ -92,8 +92,8 @@ def test_overlong_uvarint_is_rejected() -> None:
         read_uvarint(buf, 0)
 
 
-def test_compression_writer_and_tolerant_decompress() -> None:
-    """Ensure raw and zlib compressor streams can roundtrip successfully."""
+def test_compression_writer_produces_complete_stream() -> None:
+    """A normally closed writer must produce a complete round-trippable stream."""
     codecs = [CODEC_RAW, CODEC_ZLIB]
     try:
         import zstandard  # noqa: F401
@@ -111,8 +111,9 @@ def test_compression_writer_and_tolerant_decompress() -> None:
         writer.close()
 
         blob = f.getvalue()
-        decompressed = decompress_tolerant(blob, codec)
-        assert decompressed == test_data
+        result = decompress_with_status(blob, codec)
+        assert result.data == test_data
+        assert result.status is DecompressionStatus.COMPLETE
 
 
 def test_decompress_unfinalized_zlib() -> None:
