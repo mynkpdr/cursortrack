@@ -168,8 +168,9 @@ class CodecWriter:
     def close(self) -> None:
         """Finalize compression frames and flush any remaining bytes."""
         if self.codec == CODEC_ZSTD:
-            if self._w is not None and self._zstd is not None:
-                self._w.flush(self._zstd.FLUSH_FRAME)
+            if self._w is not None:
+                # close() finalizes the active frame. Flushing FLUSH_FRAME first
+                # makes close() append a second frame that decoders treat as a tail.
                 self._w.close()  # type: ignore[no-untyped-call]
         elif self.codec == CODEC_ZLIB and self._co is not None:
             self.f.write(self._co.flush(zlib.Z_FINISH))
