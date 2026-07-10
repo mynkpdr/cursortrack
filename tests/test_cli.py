@@ -16,7 +16,7 @@ from cursortrack.backends import BACKEND_CLASSES
 from cursortrack.backends.base import InputBackend
 from cursortrack.cli.app import app
 from cursortrack.core.codec import CODEC_RAW
-from cursortrack.core.events import ButtonEvent, encode_click
+from cursortrack.core.events import CAP_CLICK, CAP_MOVE, CAP_SCROLL, ButtonEvent, encode_click
 from cursortrack.core.format import pack_header
 from cursortrack.core.session import Session
 
@@ -443,6 +443,44 @@ def test_record_rejects_unknown_capture_flag() -> None:
     )
     assert result.exit_code == 2
     assert "Unknown capture flag 'bogus'" in result.output
+
+
+@pytest.mark.parametrize("capture", ["touch", "move,touch"])
+def test_record_rejects_unsupported_touch_capture(capture: str) -> None:
+    result = runner.invoke(
+        app,
+        ["record", "--backend", "mock", "--capture", capture, "--seconds", "0.1", "-q"],
+    )
+
+    assert result.exit_code == 2
+    assert "Touch capture is not supported" in result.output
+
+
+def test_record_all_captures_only_supported_mouse_events(tmp_path: object) -> None:
+    destination = str(tmp_path) + "/all-supported.ctrk"
+    result = runner.invoke(
+        app,
+        [
+            "record",
+            "--out",
+            destination,
+            "--backend",
+            "mock",
+            "--capture",
+            "all",
+            "--seconds",
+            "0.1",
+            "--codec",
+            "raw",
+            "--no-spin",
+            "--quiet",
+            "--delay",
+            "0",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert Session.load(destination).capture_mask == CAP_MOVE | CAP_CLICK | CAP_SCROLL
 
 
 def test_record_rejects_out_of_range_hz() -> None:

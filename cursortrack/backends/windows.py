@@ -9,7 +9,7 @@ from typing import Any, Callable
 
 from cursortrack.backends._pynput_listener import verify_listener_running
 from cursortrack.backends.base import InputBackend
-from cursortrack.core.events import CAP_CLICK, CAP_SCROLL, CAP_TOUCH
+from cursortrack.core.events import CAP_CLICK, CAP_SCROLL
 
 # Win32 Mouse Constants
 MOUSEEVENTF_LEFTDOWN = 0x0002
@@ -193,6 +193,11 @@ class WindowsBackend(InputBackend):
         on_event: Callable[[str, tuple[Any, ...], float], None],
         capture_mask: int,
     ) -> None:
+        want_click = bool(capture_mask & CAP_CLICK)
+        want_scroll = bool(capture_mask & CAP_SCROLL)
+        if not (want_click or want_scroll):
+            return
+
         # Dynamic import of pynput listener
         try:
             from pynput import mouse
@@ -203,12 +208,6 @@ class WindowsBackend(InputBackend):
             )
 
         import time
-
-        want_click = bool(capture_mask & (CAP_CLICK | CAP_TOUCH))
-        want_scroll = bool(capture_mask & CAP_SCROLL)
-
-        if not (want_click or want_scroll):
-            return
 
         def _on_click(x: float, y: float, button: Any, pressed: bool) -> None:
             if want_click:
