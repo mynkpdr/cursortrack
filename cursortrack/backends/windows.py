@@ -10,6 +10,14 @@ from typing import Any, Callable
 from cursortrack.backends._pynput_listener import verify_listener_running
 from cursortrack.backends.base import InputBackend
 from cursortrack.core.events import CAP_CLICK, CAP_SCROLL
+from cursortrack.core.layout import (
+    CoordinateUnit,
+    DesktopLayout,
+    InputCapabilities,
+    MonitorLayout,
+    Rect,
+    ScrollUnit,
+)
 
 # Win32 Mouse Constants
 MOUSEEVENTF_LEFTDOWN = 0x0002
@@ -155,6 +163,35 @@ class WindowsBackend(InputBackend):
         origin_y = self._user32.GetSystemMetrics(SM_YVIRTUALSCREEN)
         width, height = self.get_screen_size()
         return int(origin_x), int(origin_y), width, height
+
+    def get_layout(self) -> DesktopLayout:
+        origin_x, origin_y, width, height = self.get_screen_bounds()
+        if width <= 0 or height <= 0:
+            return DesktopLayout.unknown(CoordinateUnit.PHYSICAL_PIXEL)
+        bounds = Rect(origin_x, origin_y, width, height)
+        return DesktopLayout(
+            known=True,
+            coordinate_unit=CoordinateUnit.PHYSICAL_PIXEL,
+            bounds=bounds,
+            monitors=(MonitorLayout(id="virtual-desktop", primary=True, bounds=bounds),),
+        )
+
+    def get_capabilities(self) -> InputCapabilities:
+        layout = self.get_layout()
+        return InputCapabilities(
+            coordinate_unit=layout.coordinate_unit,
+            coordinate_unit_id=layout.coordinate_unit_id,
+            buttons=("left", "right", "middle", "x1", "x2"),
+            scroll_units=(ScrollUnit.WHEEL_DETENT,),
+            precise_scroll=False,
+            read_position=True,
+            inject_position=True,
+            inject_buttons=True,
+            inject_scroll=True,
+            capture_buttons=True,
+            capture_scroll=True,
+            restrictions=("interactive-desktop-only",),
+        )
 
     def click(self, button: str, pressed: bool) -> None:
         btn = button.lower()

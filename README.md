@@ -65,11 +65,19 @@ cursortrack record --capture all --seconds 15 -o session.ctrk
 
 ### 2. Replay a Recording
 ```bash
-# Playback the session at double speed
+# Preview compatibility without injecting input
+cursortrack play session.ctrk --dry-run
+
+# Playback the session at double speed (strict layout/capability checks by default)
 cursortrack play session.ctrk --speed 2.0
+
+# Explicitly scale a recording onto a different desktop size
+cursortrack play session.ctrk --mapping scale-to-bounds
 ```
 > [!IMPORTANT]
 > **FAIL-SAFE:** If a playback gets out of control, push the mouse cursor physically to any corner of your monitor or press the **Esc** key globally on your keyboard to stop emulation immediately.
+>
+> Playback never silently remaps coordinates. Use `--dry-run` to inspect source/target layout and capability mismatches, then choose an explicit `--mapping` (`absolute`, `scale-to-bounds`, `offset`, or `target-monitor`) when desktops differ. See [docs/playback-mapping.md](docs/playback-mapping.md).
 
 ### 3. Display Session Info
 ```bash

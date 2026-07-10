@@ -8,6 +8,7 @@ import pytest
 
 from cursortrack.backends import BACKEND_CLASSES
 from cursortrack.backends.base import InputBackend
+from cursortrack.core.layout import InputCapabilities, ScrollUnit
 
 
 class MockBackend(InputBackend):
@@ -29,6 +30,22 @@ class MockBackend(InputBackend):
 
     def get_screen_size(self) -> tuple[int, int]:
         return (1920, 1080)
+
+    def get_capabilities(self) -> InputCapabilities:
+        layout = self.get_layout()
+        return InputCapabilities(
+            coordinate_unit=layout.coordinate_unit,
+            coordinate_unit_id=layout.coordinate_unit_id,
+            buttons=("left", "right", "middle", "x1", "x2"),
+            scroll_units=(ScrollUnit.WHEEL_DETENT,),
+            precise_scroll=False,
+            read_position=True,
+            inject_position=True,
+            inject_buttons=True,
+            inject_scroll=True,
+            capture_buttons=True,
+            capture_scroll=True,
+        )
 
     def click(self, button: str, pressed: bool) -> None:
         self.clicks.append((button, pressed))

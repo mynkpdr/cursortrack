@@ -15,6 +15,15 @@ from cursortrack.core.layout import (
     Scale,
     ScrollUnit,
 )
+from cursortrack.core.playback import (
+    CompatibilityFinding,
+    CompatibilityReport,
+    MappingMode,
+    PlaybackMapping,
+    TransformError,
+    assess_playback,
+    map_point,
+)
 from cursortrack.core.session import DecodeLimits, Session
 
 try:
@@ -24,15 +33,22 @@ except PackageNotFoundError:
     __version__ = "0.0.0.dev0"
 
 __all__ = [
+    "CompatibilityFinding",
+    "CompatibilityReport",
     "CoordinateUnit",
     "DecodeLimits",
     "DesktopLayout",
     "InputBackend",
     "InputCapabilities",
+    "MappingMode",
     "MonitorLayout",
+    "PlaybackMapping",
     "Rect",
     "Scale",
     "ScrollUnit",
     "Session",
+    "TransformError",
+    "assess_playback",
     "get_backend",
+    "map_point",
 ]
