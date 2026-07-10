@@ -18,7 +18,7 @@ from rich.text import Text
 
 from cursortrack.backends import get_backend
 from cursortrack.cli._format import format_hms, format_size
-from cursortrack.cli._io import refuse_overwrite
+from cursortrack.cli._io import AtomicOutput, refuse_overwrite
 from cursortrack.core.codec import (
     CODEC_NAME,
     CODEC_RAW,
@@ -311,10 +311,16 @@ def record(
             console.print(f"[bold red]Failed to establish hooks for clicks/scrolls:[/bold red] {e}")
             raise typer.Exit(code=1)
 
+    # Preserve an existing destination until a forced replacement completes.
+    replacement = AtomicOutput(out_file) if force and os.path.exists(out_file) else None
+    write_path = replacement.path if replacement is not None else out_file
+
     # Initialize file writer
     try:
-        f = open(out_file, "wb")
+        f = open(write_path, "wb")
     except Exception as e:
+        if replacement is not None:
+            replacement.discard()
         if needs_listener:
             backend.stop_listening()
         console.print(f"[bold red]Failed to open output file for writing:[/bold red] {e}")
@@ -328,7 +334,15 @@ def record(
         x0, y0 = 0, 0
 
     f.write(pack_header(codec, hz, scr_w, scr_h, start_time, x0, y0, capture))
-    writer = CodecWriter(f, codec, level)
+    try:
+        writer = CodecWriter(f, codec, level)
+    except Exception:
+        f.close()
+        if replacement is not None:
+            replacement.discard()
+        if needs_listener:
+            backend.stop_listening()
+        raise
 
     buf = bytearray()
     frame = 0
@@ -394,6 +408,7 @@ def record(
 
     console.print(f"Recording initialized. Sample rate: {hz}Hz. Press Ctrl+C to abort.")
 
+    recording_failed = False
     try:
         # Construct live view if not quiet
         live: Live | None = None
@@ -474,23 +489,41 @@ def record(
 
     except KeyboardInterrupt:
         pass
+    except BaseException:
+        recording_failed = True
+        raise
     finally:
-        if needs_listener:
-            backend.stop_listening()
-            handle_queued_events()
+        try:
+            if needs_listener:
+                backend.stop_listening()
+                handle_queued_events()
 
-        if buf:
-            writer.write(bytes(buf))
-        writer.close()
-        f.close()
+            if buf:
+                writer.write(bytes(buf))
+            writer.close()
+        except BaseException:
+            recording_failed = True
+            raise
+        finally:
+            f.close()
 
-        if sys.platform.startswith("win"):
-            try:
-                import ctypes
+            if sys.platform.startswith("win"):
+                try:
+                    import ctypes
 
-                ctypes.windll.winmm.timeEndPeriod(1)
-            except Exception:
-                pass
+                    ctypes.windll.winmm.timeEndPeriod(1)
+                except Exception:
+                    pass
+
+            if replacement is not None:
+                if recording_failed:
+                    replacement.discard()
+                else:
+                    try:
+                        replacement.commit()
+                    except BaseException:
+                        replacement.discard()
+                        raise
 
     actual_size = os.path.getsize(out_file)
     console.print(

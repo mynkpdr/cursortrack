@@ -8,7 +8,7 @@ from typing import Optional
 import typer
 from rich.console import Console
 
-from cursortrack.cli._io import refuse_overwrite
+from cursortrack.cli._io import AtomicOutput, refuse_overwrite
 from cursortrack.core.session import Session
 from cursortrack.export import export_session
 
@@ -83,7 +83,8 @@ def export(
                 "[bold yellow]Warning:[/bold yellow] recording stopped decoding early "
                 "(truncated or corrupt tail) — exporting only the recovered events."
             )
-        count = export_session(session, out_path, fmt)
+        with AtomicOutput(out_path) as write_path:
+            count = export_session(session, write_path, fmt)
         console.print(
             f"[bold green]✔ Export complete![/bold green] Wrote {count} events to {out_path}."
         )
