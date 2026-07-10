@@ -1,0 +1,33 @@
+{
+  "rfc": "docs/rfcs/0001-portable-session-v3.md",
+  "codec": "raw",
+  "fixtures": {
+    "empty": {
+      "file": "empty.hex",
+      "bytes": 429,
+      "sha256": "ebf1d59152c9ac67c6cd14845388a26ba3f3e5492e7147aecae02cbee4e96d8f",
+      "chunks": 0,
+      "events": 0,
+      "duration_us": 0,
+      "initial_pointer": [0, 0]
+    },
+    "single_move": {
+      "file": "single_move.hex",
+      "bytes": 461,
+      "sha256": "d304ebe5ff1e9464c0bafeeaa77af39c1cb1df686a1d04063b10816763fb7f21",
+      "chunks": 1,
+      "events": 1,
+      "duration_us": 1000,
+      "initial_pointer": [10, 20]
+    },
+    "multi_chunk": {
+      "file": "multi_chunk.hex",
+      "bytes": 514,
+      "sha256": "1b088bb512c150c97c6fbf6db4c0c553eb9d5f9307c2d0e5e7006a338fd7e1c2",
+      "chunks": 2,
+      "events": 3,
+      "duration_us": 1000000,
+      "initial_pointer": [100, 100]
+    }
+  }
+}

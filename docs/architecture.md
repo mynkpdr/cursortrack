@@ -38,6 +38,9 @@ The programmatic core library.
 - [format.py](../cursortrack/core/format.py) handles packing and unpacking file headers.
 - [codec.py](../cursortrack/core/codec.py) manages raw integer encodings (varint/zigzag) and streaming compression writers.
 - [events.py](../cursortrack/core/events.py) defines the structured dataclass hierarchy for input events (`MoveEvent`, `ButtonEvent`, etc.) and handles tag serialization.
+- [layout.py](../cursortrack/core/layout.py) defines immutable coordinate-unit,
+  monitor-layout, scale, and input-capability facts for the accepted v3
+  portability contract. It does not enable a v3 reader/writer by itself.
 - [session.py](../cursortrack/core/session.py) exposes the primary developer API `Session` for programmatically loading, editing, saving, and analyzing tracks (e.g. converting to Pandas DataFrames).
 
 ### `cursortrack/backends/`
