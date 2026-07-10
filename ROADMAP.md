@@ -1,6 +1,6 @@
 # CursorTrack Roadmap
 
-This document outlines the milestones and steps required to complete first-class support for Linux and macOS platforms in CursorTrack.
+This document outlines the platform and portable-replay milestones for CursorTrack.
 
 ---
 
@@ -38,3 +38,18 @@ Mac systems handle mouse and global event interception through Cocoa/Quartz APIs
 3. **Event Listening Hook**:
    - Setup a background thread mapping dynamic Quartz Event Taps. This allows capturing mouse clicks and scroll coordinates globally (requires Accessibility permission).
    - Alternatively, fall back to `pynput`'s macOS AppKit listener.
+
+---
+
+## Milestone 3: Portable Replay Contract
+
+The v1/v2 file format is OS-neutral but stores insufficient display metadata to
+replay safely across different monitor layouts, origins, scales, or coordinate
+units.
+
+### Key Tasks:
+1. Review and accept [RFC 0001](docs/rfcs/0001-portable-session-v3.md).
+2. Add v3 source-layout metadata, length-framed events, and independently
+   checksummed compression chunks while preserving v1/v2 readers.
+3. Add a no-injection compatibility preview and strict mismatch detection.
+4. Add explicit, opt-in coordinate mapping modes; never silently scale or clamp.
