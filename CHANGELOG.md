@@ -5,6 +5,54 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.2] - 2026-07-10
+
+A safety and data-integrity release. The v1/v2 on-disk layouts remain
+unchanged, but malformed input is now bounded and user-visible behavior is
+stricter where continuing could corrupt data or inject unintended input.
+
+### Added
+- **Bounded binary decoding** (#41): `DecodeLimits` caps compressed and
+  decompressed bytes, event count, frame/coordinate growth, and varint width.
+- **Integrity reporting** (#41): `Session.integrity` distinguishes `complete`,
+  `truncated`, and `corrupt-recovered` streams while preserving the existing
+  `Session.truncated` boolean.
+- **Artifact validation** (#47): CI now builds/checks wheel and sdist artifacts,
+  verifies PEP 561 metadata, and smoke-tests a minimal wheel installation.
+
+### Fixed
+- **Playback fail-safe failure handling** (#38): cursor-read or screen-bounds
+  failures now abort instead of silently disabling the fail-safe.
+- **Playback cleanup and cancellation** (#38): Esc/corner checks remain active
+  during long event gaps, the Esc hook is verified, and injected buttons are
+  released on every completion, abort, interrupt, and backend-error path.
+- **NumPy overwrite bypass** (#37): implicit `.npy` suffixes are resolved before
+  overwrite/same-file checks, and the library exporter writes the exact path it
+  receives.
+- **Atomic output replacement** (#35): exports and forced recording replacements
+  publish with an atomic rename only after successful flush/fsync; failures
+  preserve existing destinations.
+- **Recorder backend loss** (#36): initial position failure aborts before file
+  creation, and mid-session loss returns nonzero with a recoverable truncated
+  prefix instead of silently recording stationary data.
+- **Recorder timing validation** (#36): quiet mode now honors `--delay`; negative
+  or non-finite durations, non-positive flush intervals, and negative delays are
+  rejected.
+- **Interchange validation** (#39): JSONL/NumPy loaders reject malformed,
+  non-finite, out-of-order, unknown, or inconsistent events with source
+  locations. Leading blank JSONL lines no longer lose session metadata.
+- **CSV safety** (#39): standard quoting preserves embedded commas/newlines and
+  formula-like string cells are neutralized for spreadsheet use.
+- **False touch capture** (#40): mouse clicks are no longer encoded as
+  `TapEvent`; touch-only listener masks are ignored by native mouse backends.
+
+### Changed
+- `record --capture touch` now fails with a clear unsupported-capability error.
+- `record --capture all` now means all implemented mouse inputs: move, click,
+  and scroll. Legacy `CAP_TOUCH`/`TapEvent` files remain readable and playable.
+- Binary and interchange loaders now reject invalid or over-limit input rather
+  than silently coercing it.
+
 ## [0.2.1] - 2026-07-09
 
 A pure bug-fix release: twelve correctness and safety fixes across the codec, recorder, playback, CLI, and both OS backends. No file-format or breaking API changes; two behavior changes are called out below.
