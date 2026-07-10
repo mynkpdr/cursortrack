@@ -938,6 +938,123 @@ def test_export_refuses_implicit_npy_suffix_that_aliases_input() -> None:
             assert f.read() == original_contents
 
 
+def test_failed_forced_export_preserves_existing_destination() -> None:
+    """A failed replacement must not destroy a previously valid export."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        session_file = os.path.join(tmpdir, "session.ctrk")
+        record_res = runner.invoke(
+            app,
+            [
+                "record",
+                "-o",
+                session_file,
+                "--backend",
+                "mock",
+                "--seconds",
+                "0.1",
+                "--codec",
+                "raw",
+                "--no-spin",
+                "-q",
+            ],
+        )
+        assert record_res.exit_code == 0
+
+        destination = os.path.join(tmpdir, "existing.csv")
+        with open(destination, "wb") as f:
+            f.write(b"valid existing export")
+
+        def fail_after_partial_write(_session: object, path: str, _fmt: str) -> int:
+            with open(path, "wb") as f:
+                f.write(b"partial replacement")
+            raise RuntimeError("simulated exporter failure")
+
+        with mock.patch(
+            "cursortrack.cli.export.export_session",
+            side_effect=fail_after_partial_write,
+        ):
+            result = runner.invoke(
+                app,
+                ["export", session_file, "--to", "csv", "--out", destination, "--force"],
+            )
+
+        assert result.exit_code == 1
+        with open(destination, "rb") as f:
+            assert f.read() == b"valid existing export"
+        assert sorted(os.listdir(tmpdir)) == ["existing.csv", "session.ctrk"]
+
+
+def test_failed_forced_recording_preserves_existing_destination() -> None:
+    """A recorder exception must discard its replacement, not the old session."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        destination = os.path.join(tmpdir, "existing.ctrk")
+        with open(destination, "wb") as f:
+            f.write(b"valid existing recording")
+
+        with mock.patch(
+            "cursortrack.cli.record.precise_wait",
+            side_effect=RuntimeError("simulated recorder failure"),
+        ):
+            result = runner.invoke(
+                app,
+                [
+                    "record",
+                    "--out",
+                    destination,
+                    "--backend",
+                    "mock",
+                    "--seconds",
+                    "1",
+                    "--codec",
+                    "raw",
+                    "--no-spin",
+                    "--quiet",
+                    "--delay",
+                    "0",
+                    "--force",
+                ],
+            )
+
+        assert result.exit_code == 1
+        with open(destination, "rb") as f:
+            assert f.read() == b"valid existing recording"
+        assert os.listdir(tmpdir) == ["existing.ctrk"]
+
+
+def test_failed_new_recording_keeps_recoverable_prefix() -> None:
+    """New recordings retain their named partial file for crash recovery."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        destination = os.path.join(tmpdir, "new.ctrk")
+
+        with mock.patch(
+            "cursortrack.cli.record.precise_wait",
+            side_effect=RuntimeError("simulated recorder failure"),
+        ):
+            result = runner.invoke(
+                app,
+                [
+                    "record",
+                    "--out",
+                    destination,
+                    "--backend",
+                    "mock",
+                    "--seconds",
+                    "1",
+                    "--codec",
+                    "raw",
+                    "--no-spin",
+                    "--quiet",
+                    "--delay",
+                    "0",
+                ],
+            )
+
+        assert result.exit_code == 1
+        assert os.path.exists(destination)
+        with open(destination, "rb") as f:
+            assert f.read(8) == b"CURMOV02"
+
+
 def test_play_loop_runs_multiple_passes_before_failsafe_stops_it() -> None:
     """--loop should replay the session again after finishing, not just play it once."""
     with tempfile.TemporaryDirectory() as tmpdir:
