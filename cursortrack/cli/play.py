@@ -12,6 +12,7 @@ from rich.console import Console
 from rich.progress import Progress
 
 from cursortrack.backends import get_backend
+from cursortrack.backends._pynput_listener import verify_listener_running
 from cursortrack.core.events import ButtonEvent, ScrollEvent, TapEvent
 from cursortrack.core.session import Session
 
@@ -42,20 +43,40 @@ def _is_in_corner(x: int, y: int, ox: int, oy: int, w: int, h: int) -> bool:
 
 
 def precise_wait(
-    target: float, perf: Callable[[], float], spin: bool, spin_threshold: float = 0.0012
-) -> None:
-    """Precisely wait until target time using sleep and optional busy-wait spinning."""
-    if not spin:
-        r = target - perf()
-        if r > 0:
-            time.sleep(r)
-        return
+    target: float,
+    perf: Callable[[], float],
+    spin: bool,
+    spin_threshold: float = 0.0012,
+    should_abort: Callable[[], bool] | None = None,
+    poll_interval: float = 0.05,
+) -> bool:
+    """Wait until target time, optionally polling a cancellation callback."""
+    if should_abort is None:
+        if not spin:
+            r = target - perf()
+            if r > 0:
+                time.sleep(r)
+            return True
+        while True:
+            r = target - perf()
+            if r <= 0:
+                return True
+            if r > spin_threshold:
+                time.sleep(r - spin_threshold)
+
+    # Long event gaps must remain interruptible. Keep the final spin window
+    # precise while slicing longer sleeps so Esc/corner checks run regularly.
     while True:
+        if should_abort():
+            return False
         r = target - perf()
         if r <= 0:
-            return
-        if r > spin_threshold:
-            time.sleep(r - spin_threshold)
+            return True
+        if spin:
+            if r > spin_threshold:
+                time.sleep(min(r - spin_threshold, poll_interval))
+        else:
+            time.sleep(min(r, poll_interval))
 
 
 @app.command()
@@ -112,7 +133,18 @@ def play(
 
     # Detect virtual screen bounds (origin can be negative on multi-monitor
     # setups where a secondary monitor sits left of or above the primary one)
-    scr_ox, scr_oy, scr_w, scr_h = backend.get_screen_bounds()
+    try:
+        scr_ox, scr_oy, scr_w, scr_h = backend.get_screen_bounds()
+    except Exception as e:
+        console.print(f"[bold red]Error reading screen bounds:[/bold red] {e}")
+        raise typer.Exit(code=1)
+    if scr_w <= 0 or scr_h <= 0:
+        console.print(
+            f"[bold red]Error:[/bold red] Invalid screen bounds "
+            f"({scr_ox}, {scr_oy}, {scr_w}, {scr_h}); playback cannot establish "
+            "a working fail-safe."
+        )
+        raise typer.Exit(code=1)
 
     # Countdown delay. Sleep unconditionally so -q still enforces the safety
     # grace period; only the per-second prints are gated on quiet. No Esc
@@ -137,6 +169,15 @@ def play(
 
     abort_keyboard = False
     kb_listener: Any = None
+
+    def stop_keyboard_listener() -> None:
+        if kb_listener is None:
+            return
+        with contextlib.suppress(Exception):
+            kb_listener.stop()
+        with contextlib.suppress(Exception):
+            kb_listener.join(timeout=2.0)
+
     try:
         from pynput import keyboard
 
@@ -147,6 +188,10 @@ def play(
 
         kb_listener = keyboard.Listener(on_press=on_press)
         kb_listener.start()
+        verify_listener_running(
+            kb_listener,
+            "The pynput keyboard hook failed to start. Esc abort is unavailable.",
+        )
     except ImportError:
         if not quiet:
             console.print(
@@ -157,6 +202,7 @@ def play(
         # missing permissions, platform quirk, etc). The Esc shortcut is a convenience
         # on top of the mouse-to-corner fail-safe, not the only abort path, so degrade
         # gracefully instead of crashing playback over it.
+        stop_keyboard_listener()
         kb_listener = None
         if not quiet:
             console.print(
@@ -183,55 +229,83 @@ def play(
 
         last_expected_x: int | None = None
         last_expected_y: int | None = None
+        pressed_buttons: set[str] = set()
+        abort_message: str | None = None
 
-        with Progress(disable=quiet, transient=True) as progress:
-            task = progress.add_task("[green]Playing...", total=n)
+        def should_abort() -> bool:
+            nonlocal abort_message
+            if abort_keyboard:
+                abort_message = "Abort keyboard shortcut (Esc) pressed! Aborting playback."
+                return True
 
-            for i, ev in enumerate(events):
-                # Timing coordination
-                target = origin + (ev.frame / session.rate) / speed
-                precise_wait(target, perf, spin)
+            try:
+                rx, ry = backend.read_position()
+            except Exception as e:
+                abort_message = f"Fail-safe cursor check failed ({e}); aborting playback."
+                return True
 
-                # Check keyboard abort
-                if abort_keyboard:
-                    console.print(
-                        "\n[bold red]Abort keyboard shortcut (Esc) pressed![/bold red] Aborting playback."
-                    )
-                    return False
+            is_in_corner = _is_in_corner(rx, ry, scr_ox, scr_oy, scr_w, scr_h)
+            last_expected_in_corner = False
+            if last_expected_x is not None and last_expected_y is not None:
+                last_expected_in_corner = _is_in_corner(
+                    last_expected_x, last_expected_y, scr_ox, scr_oy, scr_w, scr_h
+                )
+            if is_in_corner and not last_expected_in_corner:
+                abort_message = f"Fail-safe triggered at cursor ({rx}, {ry})! Aborting playback."
+                return True
+            return False
 
-                # Check fail-safe: did user force mouse to a corner?
+        def release_pressed_buttons() -> None:
+            failures: list[str] = []
+            for button in sorted(pressed_buttons):
                 try:
-                    rx, ry = backend.read_position()
-                    is_in_corner = _is_in_corner(rx, ry, scr_ox, scr_oy, scr_w, scr_h)
-                    last_expected_in_corner = False
-                    if last_expected_x is not None and last_expected_y is not None:
-                        last_expected_in_corner = _is_in_corner(
-                            last_expected_x, last_expected_y, scr_ox, scr_oy, scr_w, scr_h
-                        )
-                    if is_in_corner and not last_expected_in_corner:
-                        console.print(
-                            f"\n[bold red]Fail-safe triggered at cursor ({rx}, {ry})![/bold red] Aborting playback."
-                        )
+                    backend.click(button, False)
+                except Exception as e:
+                    failures.append(f"{button}: {e}")
+            pressed_buttons.clear()
+            if failures:
+                raise RuntimeError(
+                    "Failed to release injected mouse buttons during playback cleanup: "
+                    + "; ".join(failures)
+                )
+
+        try:
+            with Progress(disable=quiet, transient=True) as progress:
+                task = progress.add_task("[green]Playing...", total=n)
+
+                for i, ev in enumerate(events):
+                    # Timing coordination and abort checks share one loop so a
+                    # sparse recording cannot suppress the fail-safe for seconds.
+                    target = origin + (ev.frame / session.rate) / speed
+                    if not precise_wait(target, perf, spin, should_abort=should_abort):
+                        console.print(f"\n[bold red]{abort_message}[/bold red]")
                         return False
-                except Exception:
-                    pass
 
-                # Emulate movement
-                backend.set_position(ev.x, ev.y)
-                last_expected_x = ev.x
-                last_expected_y = ev.y
+                    # Emulate movement
+                    backend.set_position(ev.x, ev.y)
+                    last_expected_x = ev.x
+                    last_expected_y = ev.y
 
-                # Emulate clicks & scrolls
-                if isinstance(ev, ButtonEvent):
-                    backend.click(ev.button, ev.pressed)
-                elif isinstance(ev, ScrollEvent):
-                    backend.scroll(ev.sdx, ev.sdy)
-                elif isinstance(ev, TapEvent):
-                    backend.click("left", True)
-                    backend.click("left", False)
+                    # Emulate clicks & scrolls. Track every successful button-down
+                    # so cleanup can neutralize malformed files and interrupted runs.
+                    if isinstance(ev, ButtonEvent):
+                        backend.click(ev.button, ev.pressed)
+                        if ev.pressed:
+                            pressed_buttons.add(ev.button)
+                        else:
+                            pressed_buttons.discard(ev.button)
+                    elif isinstance(ev, ScrollEvent):
+                        backend.scroll(ev.sdx, ev.sdy)
+                    elif isinstance(ev, TapEvent):
+                        backend.click("left", True)
+                        pressed_buttons.add("left")
+                        backend.click("left", False)
+                        pressed_buttons.discard("left")
 
-                progress.update(task, completed=i + 1)
-        return True
+                    progress.update(task, completed=i + 1)
+            return True
+        finally:
+            release_pressed_buttons()
 
     aborted = False
     interrupted = False
@@ -251,10 +325,11 @@ def play(
         interrupted = True
         if not quiet:
             console.print("\n[yellow]Playback stopped by user (Ctrl+C).[/yellow]")
+    except Exception as e:
+        aborted = True
+        console.print(f"\n[bold red]Playback failed:[/bold red] {e}")
     finally:
-        if kb_listener is not None:
-            with contextlib.suppress(Exception):
-                kb_listener.stop()
+        stop_keyboard_listener()
         if sys.platform.startswith("win"):
             try:
                 import ctypes

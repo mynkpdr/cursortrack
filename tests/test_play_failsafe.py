@@ -8,9 +8,11 @@ primary one.
 
 from __future__ import annotations
 
+from unittest import mock
+
 import pytest
 
-from cursortrack.cli.play import _is_in_corner
+from cursortrack.cli.play import _is_in_corner, precise_wait
 
 # Single-monitor bounds: origin at (0, 0), 1920x1080.
 SINGLE_MONITOR = (0, 0, 1920, 1080)
@@ -69,3 +71,24 @@ def test_origin_at_zero_zero_is_not_a_false_corner_for_negative_origin_desktop()
     """
     ox, oy, w, h = MULTI_MONITOR_NEGATIVE_ORIGIN
     assert not _is_in_corner(0, 0, ox, oy, w, h)
+
+
+def test_precise_wait_can_abort_during_a_long_event_gap() -> None:
+    """Cancellation must be checked between short sleep slices, not after the target."""
+    checks = 0
+
+    def should_abort() -> bool:
+        nonlocal checks
+        checks += 1
+        return checks >= 2
+
+    with mock.patch("cursortrack.cli.play.time.sleep") as sleep:
+        completed = precise_wait(
+            target=10.0,
+            perf=lambda: 0.0,
+            spin=False,
+            should_abort=should_abort,
+        )
+
+    assert completed is False
+    sleep.assert_called_once_with(0.05)
