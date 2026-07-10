@@ -14,7 +14,9 @@ from typer.testing import CliRunner
 from cursortrack.backends import BACKEND_CLASSES
 from cursortrack.backends.base import InputBackend
 from cursortrack.cli.app import app
-from cursortrack.core.events import ButtonEvent
+from cursortrack.core.codec import CODEC_RAW
+from cursortrack.core.events import ButtonEvent, encode_click
+from cursortrack.core.format import pack_header
 from cursortrack.core.session import Session
 
 runner = CliRunner()
@@ -179,6 +181,93 @@ class MixedButtonClickBackend(InputBackend):
 
     def stop_listening(self) -> None:
         self.callback = None
+
+
+class FailingSafetyBackend(InputBackend):
+    """Backend whose fail-safe position sensor is unavailable."""
+
+    moves: ClassVar[int] = 0
+
+    def read_position(self) -> tuple[int, int]:
+        raise OSError("position sensor unavailable")
+
+    def set_position(self, x: int, y: int) -> None:
+        del x, y
+        type(self).moves += 1
+
+    def get_screen_size(self) -> tuple[int, int]:
+        return (1920, 1080)
+
+    def click(self, button: str, pressed: bool) -> None:
+        pass
+
+    def scroll(self, sdx: int, sdy: int) -> None:
+        pass
+
+    def start_listening(
+        self, on_event: Callable[[str, tuple[Any, ...], float], None], capture_mask: int
+    ) -> None:
+        pass
+
+    def stop_listening(self) -> None:
+        pass
+
+
+class ButtonCornerAbortBackend(InputBackend):
+    """Track injected buttons and move to a corner after a configured read."""
+
+    trigger_after: ClassVar[int] = 2
+    clicks: ClassVar[list[tuple[str, bool]]] = []
+
+    def __init__(self) -> None:
+        self.pos = (500, 500)
+        self.reads = 0
+
+    def read_position(self) -> tuple[int, int]:
+        self.reads += 1
+        if self.reads > type(self).trigger_after:
+            return (0, 0)
+        return self.pos
+
+    def set_position(self, x: int, y: int) -> None:
+        self.pos = (x, y)
+
+    def get_screen_size(self) -> tuple[int, int]:
+        return (1920, 1080)
+
+    def click(self, button: str, pressed: bool) -> None:
+        type(self).clicks.append((button, pressed))
+
+    def scroll(self, sdx: int, sdy: int) -> None:
+        pass
+
+    def start_listening(
+        self, on_event: Callable[[str, tuple[Any, ...], float], None], capture_mask: int
+    ) -> None:
+        pass
+
+    def stop_listening(self) -> None:
+        pass
+
+
+def _write_raw_button_session(path: str, gap_frames: int, include_up: bool = True) -> None:
+    """Write a minimal session with a left-button down and optional delayed up."""
+    body = bytearray()
+    encode_click(body, 0, True, 0, 0, 0)
+    if include_up:
+        encode_click(body, gap_frames, False, 0, 0, 0)
+    header = pack_header(
+        codec=CODEC_RAW,
+        rate=100,
+        scr_w=1920,
+        scr_h=1080,
+        start=1000.0,
+        x0=500,
+        y0=500,
+        capture=3,
+    )
+    with open(path, "wb") as f:
+        f.write(header + body)
 
 
 def test_cli_version() -> None:
@@ -850,3 +939,85 @@ def test_play_quiet_still_sleeps_through_delay_before_moving_cursor() -> None:
         ][:3]
         assert len(countdown_sleep_positions) == 3
         assert max(countdown_sleep_positions) < first_move
+
+
+def test_play_aborts_when_failsafe_position_read_fails(tmp_path: object) -> None:
+    """Losing the safety sensor must stop playback before any input is injected."""
+    session_file = str(tmp_path) + "/failsafe-read.ctrk"
+    _write_raw_button_session(session_file, gap_frames=1)
+    FailingSafetyBackend.moves = 0
+    BACKEND_CLASSES["mock"] = FailingSafetyBackend
+
+    result = runner.invoke(
+        app,
+        [
+            "play",
+            session_file,
+            "--backend",
+            "mock",
+            "--delay",
+            "0",
+            "--no-spin",
+            "--quiet",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "Fail-safe cursor check failed" in result.output
+    assert FailingSafetyBackend.moves == 0
+
+
+def test_play_releases_unmatched_button_down_after_success(tmp_path: object) -> None:
+    """A malformed stream ending after DOWN must not leave the OS button held."""
+    session_file = str(tmp_path) + "/unmatched-down.ctrk"
+    _write_raw_button_session(session_file, gap_frames=0, include_up=False)
+    ButtonCornerAbortBackend.trigger_after = 10_000
+    ButtonCornerAbortBackend.clicks = []
+    BACKEND_CLASSES["mock"] = ButtonCornerAbortBackend
+
+    result = runner.invoke(
+        app,
+        [
+            "play",
+            session_file,
+            "--backend",
+            "mock",
+            "--delay",
+            "0",
+            "--no-spin",
+            "--quiet",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert ButtonCornerAbortBackend.clicks == [("left", True), ("left", False)]
+
+
+def test_play_interrupts_long_wait_and_releases_button_on_corner(tmp_path: object) -> None:
+    """Abort checks must run during event gaps, then neutralize injected state."""
+    session_file = str(tmp_path) + "/long-gap.ctrk"
+    _write_raw_button_session(session_file, gap_frames=50)
+    ButtonCornerAbortBackend.trigger_after = 2
+    ButtonCornerAbortBackend.clicks = []
+    BACKEND_CLASSES["mock"] = ButtonCornerAbortBackend
+
+    started = time.monotonic()
+    result = runner.invoke(
+        app,
+        [
+            "play",
+            session_file,
+            "--backend",
+            "mock",
+            "--delay",
+            "0",
+            "--no-spin",
+            "--quiet",
+        ],
+    )
+    elapsed = time.monotonic() - started
+
+    assert result.exit_code == 1
+    assert elapsed < 0.3
+    assert "Fail-safe triggered" in result.output
+    assert ButtonCornerAbortBackend.clicks == [("left", True), ("left", False)]
