@@ -5,21 +5,36 @@ from __future__ import annotations
 import contextlib
 import sys
 import time
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 import typer
 from rich.console import Console
 from rich.progress import Progress
+from rich.table import Table
 
 from cursortrack.backends import get_backend
 from cursortrack.backends._pynput_listener import verify_listener_running
 from cursortrack.core.events import ButtonEvent, ScrollEvent, TapEvent
+from cursortrack.core.playback import (
+    CompatibilityReport,
+    MappingMode,
+    PlaybackMapping,
+    assess_playback,
+    map_point,
+)
 from cursortrack.core.session import Session
 
 app = typer.Typer(
     help="Play back a recorded input session. Abort by moving the mouse to a corner or pressing Esc."
 )
 console = Console()
+
+_MAPPING_CHOICES = {
+    "absolute": MappingMode.ABSOLUTE,
+    "scale-to-bounds": MappingMode.SCALE_TO_BOUNDS,
+    "offset": MappingMode.OFFSET,
+    "target-monitor": MappingMode.TARGET_MONITOR,
+}
 
 
 def _is_in_corner(x: int, y: int, ox: int, oy: int, w: int, h: int) -> bool:
@@ -79,6 +94,63 @@ def precise_wait(
             time.sleep(min(r, poll_interval))
 
 
+def _parse_mapping(
+    mapping_name: str,
+    offset_x: int,
+    offset_y: int,
+    source_monitor: Optional[str],
+    target_monitor: Optional[str],
+) -> PlaybackMapping:
+    try:
+        mode = _MAPPING_CHOICES[mapping_name]
+    except KeyError as exc:
+        raise typer.BadParameter(
+            "Mapping must be one of: absolute, scale-to-bounds, offset, target-monitor."
+        ) from exc
+    try:
+        return PlaybackMapping(
+            mode=mode,
+            offset_x=offset_x,
+            offset_y=offset_y,
+            source_monitor=source_monitor,
+            target_monitor=target_monitor,
+        )
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+
+def _print_compatibility_report(report: CompatibilityReport, *, quiet: bool) -> None:
+    if quiet and report.ok:
+        return
+
+    table = Table(title="Playback compatibility", show_header=True, header_style="bold")
+    table.add_column("Severity", style="bold")
+    table.add_column("Code")
+    table.add_column("Message")
+
+    if not report.findings:
+        table.add_row("ok", "-", "No compatibility issues detected.")
+    for finding in report.findings:
+        severity = "error" if finding.blocking else "warning"
+        style = "red" if finding.blocking else "yellow"
+        table.add_row(f"[{style}]{severity}[/{style}]", finding.code, finding.message)
+
+    console.print(table)
+    if report.mapping is not None and not quiet:
+        console.print(f"Mapping mode: [cyan]{report.mapping.mode.value}[/cyan]")
+    if report.source_layout is not None and report.target_layout is not None and not quiet:
+        src = report.source_layout
+        dst = report.target_layout
+        console.print(
+            f"Source layout known={src.known} unit={src.coordinate_unit.value} "
+            f"bounds={src.bounds!r}"
+        )
+        console.print(
+            f"Target layout known={dst.known} unit={dst.coordinate_unit.value} "
+            f"bounds={dst.bounds!r}"
+        )
+
+
 @app.command()
 def play(
     file: str = typer.Argument(..., help="Path to the recording file (.ctrk, .npy, or .jsonl)."),
@@ -102,6 +174,33 @@ def play(
     quiet: bool = typer.Option(
         False, "--quiet", "-q", help="Suppress status and progress displays."
     ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Print a compatibility report and exit without injecting input.",
+    ),
+    strict: bool = typer.Option(
+        True,
+        "--strict/--permissive",
+        help="Refuse incompatible layouts/capabilities (strict, default) or warn and continue.",
+    ),
+    mapping_name: str = typer.Option(
+        "absolute",
+        "--mapping",
+        help="Coordinate mapping: absolute, scale-to-bounds, offset, or target-monitor.",
+    ),
+    offset_x: int = typer.Option(0, "--offset-x", help="X offset for --mapping offset."),
+    offset_y: int = typer.Option(0, "--offset-y", help="Y offset for --mapping offset."),
+    source_monitor: Optional[str] = typer.Option(
+        None,
+        "--source-monitor",
+        help="Source monitor id for --mapping target-monitor.",
+    ),
+    target_monitor: Optional[str] = typer.Option(
+        None,
+        "--target-monitor",
+        help="Target monitor id for --mapping target-monitor.",
+    ),
 ) -> None:
     """Drive the physical cursor using events recorded in a session file."""
     if speed <= 0:
@@ -124,12 +223,40 @@ def play(
             "(truncated or corrupt tail) — playing back only the recovered events."
         )
 
+    mapping = _parse_mapping(mapping_name, offset_x, offset_y, source_monitor, target_monitor)
+
     # Initialize backend
     try:
         backend = get_backend(backend_name)
     except Exception as e:
         console.print(f"[bold red]Error initializing backend:[/bold red] {e}")
         raise typer.Exit(code=1)
+
+    try:
+        target_layout = backend.get_layout()
+        target_capabilities = backend.get_capabilities()
+    except Exception as e:
+        console.print(f"[bold red]Error reading target layout/capabilities:[/bold red] {e}")
+        raise typer.Exit(code=1)
+
+    report = assess_playback(
+        session,
+        target_layout,
+        target_capabilities,
+        mapping,
+        strict=strict,
+    )
+    _print_compatibility_report(report, quiet=quiet and not dry_run)
+    if not report.ok:
+        console.print(
+            "[bold red]Playback refused:[/bold red] resolve compatibility errors, "
+            "choose an explicit --mapping, or pass --permissive after review."
+        )
+        raise typer.Exit(code=1)
+    if dry_run:
+        if not quiet:
+            console.print("[bold green]✔ Dry-run complete (no input injected).[/bold green]")
+        raise typer.Exit(code=0)
 
     # Detect virtual screen bounds (origin can be negative on multi-monitor
     # setups where a secondary monitor sits left of or above the primary one)
@@ -221,6 +348,8 @@ def play(
             pass
 
     perf = time.perf_counter
+    source_layout = report.source_layout
+    assert source_layout is not None
 
     def run_playback_once() -> bool:
         events = session.events
@@ -281,10 +410,10 @@ def play(
                         console.print(f"\n[bold red]{abort_message}[/bold red]")
                         return False
 
-                    # Emulate movement
-                    backend.set_position(ev.x, ev.y)
-                    last_expected_x = ev.x
-                    last_expected_y = ev.y
+                    px, py = map_point(ev.x, ev.y, source_layout, target_layout, mapping)
+                    backend.set_position(px, py)
+                    last_expected_x = px
+                    last_expected_y = py
 
                     # Emulate clicks & scrolls. Track every successful button-down
                     # so cleanup can neutralize malformed files and interrupted runs.

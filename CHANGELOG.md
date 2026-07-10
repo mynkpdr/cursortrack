@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Playback compatibility preview** (#50): `play --dry-run` reports source/target
+  layout and capability mismatches without injecting input.
+- **Explicit coordinate mapping** (#50): `--mapping absolute|scale-to-bounds|offset|target-monitor`
+  with `--offset-x`/`--offset-y` and `--source-monitor`/`--target-monitor`. Transforms
+  are pure and never silently clamp.
+- **Strict playback default** (#50): incompatible known layouts, missing button/scroll
+  capabilities, invalid button state, and non-complete integrity refuse playback;
+  `--permissive` demotes policy refusals to warnings after review.
+- Backend `get_layout()` / `get_capabilities()` on Windows and Linux, plus Session
+  `source_layout()`, `source_capabilities()`, `button_state_valid`, and
+  `layout_metadata_sufficient` helpers.
+- Documentation for mapping modes and impossible cross-machine cases in
+  [docs/playback-mapping.md](docs/playback-mapping.md).
+
+### Changed
+- `play` now negotiates compatibility before injection. Same-machine v1/v2 replay
+  with matching screen size still works under absolute mapping, with warnings about
+  insufficient portable metadata.
+
 ## [0.2.2] - 2026-07-10
 
 A safety and data-integrity release. The v1/v2 on-disk layouts remain
