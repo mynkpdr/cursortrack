@@ -104,7 +104,7 @@ def _declare_prototypes(user32: Any) -> None:
         user32.SetProcessDPIAware.argtypes = []
 
 
-def _enable_dpi_awareness(user32: Any) -> None:
+def _enable_dpi_awareness(user32: Any) -> bool:
     """Request per-monitor DPI awareness, falling back for older Windows.
 
     SetProcessDpiAwarenessContext requires Windows 10 1703+ and correctly
@@ -112,16 +112,21 @@ def _enable_dpi_awareness(user32: Any) -> None:
     call is otherwise rejected) fall back to the legacy, primary-monitor-only
     SetProcessDPIAware(), which is still strictly better than leaving DPI
     virtualization on and getting scaled coordinates.
+
+    Returns:
+        True only when per-monitor-v2 awareness was established and physical
+        coordinate metadata can be advertised with confidence.
     """
     try:
         if user32.SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2):
-            return
+            return True
     except (AttributeError, OSError):
         pass
     try:
         user32.SetProcessDPIAware()
     except Exception:
         pass
+    return False
 
 
 class WindowsBackend(InputBackend):
@@ -133,7 +138,7 @@ class WindowsBackend(InputBackend):
 
         self._user32 = ctypes.windll.user32
         _declare_prototypes(self._user32)
-        _enable_dpi_awareness(self._user32)
+        self._physical_coordinates_verified = _enable_dpi_awareness(self._user32)
 
         self._listener: Any | None = None
 
@@ -166,12 +171,16 @@ class WindowsBackend(InputBackend):
 
     def get_layout(self) -> DesktopLayout:
         origin_x, origin_y, width, height = self.get_screen_bounds()
+        physical = getattr(self, "_physical_coordinates_verified", False)
+        coordinate_unit = CoordinateUnit.PHYSICAL_PIXEL if physical else CoordinateUnit.BACKEND_UNIT
+        coordinate_unit_id = None if physical else "win32-desktop-v1"
         if width <= 0 or height <= 0:
-            return DesktopLayout.unknown(CoordinateUnit.PHYSICAL_PIXEL)
+            return DesktopLayout.unknown(coordinate_unit, coordinate_unit_id)
         bounds = Rect(origin_x, origin_y, width, height)
         return DesktopLayout(
             known=True,
-            coordinate_unit=CoordinateUnit.PHYSICAL_PIXEL,
+            coordinate_unit=coordinate_unit,
+            coordinate_unit_id=coordinate_unit_id,
             bounds=bounds,
             monitors=(MonitorLayout(id="virtual-desktop", primary=True, bounds=bounds),),
         )

@@ -87,6 +87,16 @@ def _buttons_used(session: Session) -> tuple[str, ...]:
     return tuple(button for button in CANONICAL_BUTTONS if button in used)
 
 
+def _unknown_buttons_used(session: Session) -> tuple[str, ...]:
+    known = set(CANONICAL_BUTTONS)
+    unknown = {
+        event.button
+        for event in session.events
+        if isinstance(event, ButtonEvent) and event.button not in known
+    }
+    return tuple(sorted(unknown))
+
+
 def _has_scroll(session: Session) -> bool:
     return any(isinstance(event, ScrollEvent) for event in session.events)
 
@@ -158,8 +168,31 @@ def assess_playback(
             blocking=True,
         )
 
+    for restriction in target_capabilities.restrictions:
+        add(
+            "target-restriction",
+            f"Target backend restriction: {restriction}.",
+            blocking=False,
+        )
+
     # Capability negotiation
-    for button in _buttons_used(session):
+    unknown_buttons = _unknown_buttons_used(session)
+    for button in unknown_buttons:
+        add(
+            "button-unknown",
+            f"Session uses unknown button {button!r}; playback cannot preserve it.",
+            blocking=True,
+        )
+
+    used_buttons = _buttons_used(session)
+    if used_buttons and not target_capabilities.inject_buttons:
+        add(
+            "button-inject",
+            "Session contains button events but the target cannot inject buttons.",
+            blocking=True,
+        )
+
+    for button in used_buttons:
         if not target_capabilities.supports_button(button):
             add(
                 "button-capability",
@@ -275,15 +308,34 @@ def assess_playback(
                 blocking=False,
             )
 
-    # Sample a few points under the chosen mapping to surface transform failures early.
+    # Validate every mapped event: a late point must not escape preview just
+    # because the first sample happened to fit.
     if not any(f.code == "mapping-invalid" and f.blocking for f in findings):
-        sample = session.events[: min(32, len(session.events))]
-        for event in sample:
+        for event in session.events:
             try:
-                map_point(event.x, event.y, source_layout, target_layout, active_mapping)
+                mapped_x, mapped_y = map_point(
+                    event.x,
+                    event.y,
+                    source_layout,
+                    target_layout,
+                    active_mapping,
+                )
             except TransformError as exc:
                 add("mapping-invalid", str(exc), blocking=True)
                 break
+            if target_layout.known and target_layout.bounds is not None:
+                bounds = target_layout.bounds
+                inside = (
+                    bounds.x <= mapped_x < bounds.right and bounds.y <= mapped_y < bounds.bottom
+                )
+                if not inside:
+                    add(
+                        "mapped-outside-target",
+                        f"Event at ({event.x}, {event.y}) maps to ({mapped_x}, {mapped_y}), "
+                        f"outside target bounds {bounds!r}. Values are not clamped.",
+                        blocking=strict,
+                    )
+                    break
 
     if not strict:
         # Permissive mode keeps hard transform/config failures blocking, but demotes
@@ -293,6 +345,8 @@ def assess_playback(
             "mapping-invalid",
             "scale-requires-known",
             "target-pointer",
+            "button-unknown",
+            "button-inject",
             "button-capability",
             "scroll-inject",
             "scroll-unit",

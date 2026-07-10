@@ -143,11 +143,11 @@ def _print_compatibility_report(report: CompatibilityReport, *, quiet: bool) -> 
         dst = report.target_layout
         console.print(
             f"Source layout known={src.known} unit={src.coordinate_unit.value} "
-            f"bounds={src.bounds!r}"
+            f"bounds={src.bounds!r} monitors={src.monitor_ids}"
         )
         console.print(
             f"Target layout known={dst.known} unit={dst.coordinate_unit.value} "
-            f"bounds={dst.bounds!r}"
+            f"bounds={dst.bounds!r} monitors={dst.monitor_ids}"
         )
 
 

@@ -15,7 +15,15 @@ from typing import Any
 
 import pytest
 
-from cursortrack.backends.windows import POINT, WindowsBackend, _declare_prototypes
+from cursortrack.backends.windows import (
+    POINT,
+    SM_CXVIRTUALSCREEN,
+    SM_CYVIRTUALSCREEN,
+    WindowsBackend,
+    _declare_prototypes,
+    _enable_dpi_awareness,
+)
+from cursortrack.core.layout import CoordinateUnit
 
 IS_WINDOWS = sys.platform.startswith("win")
 
@@ -103,6 +111,52 @@ def test_declare_prototypes_sets_explicit_bool_restype_for_position_calls() -> N
     assert dummy.GetSystemMetrics.restype is ctypes.c_int
     assert dummy.GetSystemMetrics.argtypes == [ctypes.c_int]
     assert dummy.mouse_event.argtypes[:4] == [ctypes.c_ulong] * 4
+
+
+def test_dpi_awareness_is_verified_only_for_per_monitor_v2() -> None:
+    modern: Any = type(
+        "_Modern",
+        (),
+        {
+            "SetProcessDpiAwarenessContext": lambda _self, _context: 1,
+            "SetProcessDPIAware": lambda _self: pytest.fail("fallback should not run"),
+        },
+    )()
+    assert _enable_dpi_awareness(modern) is True
+
+    legacy: Any = type(
+        "_Legacy",
+        (),
+        {
+            "SetProcessDpiAwarenessContext": lambda _self, _context: 0,
+            "SetProcessDPIAware": lambda _self: 1,
+        },
+    )()
+    assert _enable_dpi_awareness(legacy) is False
+
+
+def test_layout_claims_physical_pixels_only_after_verified_dpi_awareness() -> None:
+    metrics = {
+        SM_CXVIRTUALSCREEN: 1920,
+        SM_CYVIRTUALSCREEN: 1080,
+    }
+    user32: Any = type(
+        "_Metrics",
+        (),
+        {"GetSystemMetrics": lambda _self, index: metrics.get(index, 0)},
+    )()
+    backend = object.__new__(WindowsBackend)
+    backend._user32 = user32
+
+    backend._physical_coordinates_verified = False
+    uncertain = backend.get_layout()
+    assert uncertain.coordinate_unit is CoordinateUnit.BACKEND_UNIT
+    assert uncertain.coordinate_unit_id == "win32-desktop-v1"
+
+    backend._physical_coordinates_verified = True
+    physical = backend.get_layout()
+    assert physical.coordinate_unit is CoordinateUnit.PHYSICAL_PIXEL
+    assert physical.coordinate_unit_id is None
 
 
 # --- Real Win32 tests: skip everywhere but Windows ---------------------------
