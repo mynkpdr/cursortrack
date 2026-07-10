@@ -2,6 +2,10 @@
 
 CursorTrack uses a custom binary format (`.ctrk` or legacy `.curmov`) designed to minimize disk size for long, mostly idle mouse capture sessions. It utilizes **varint encoding**, **zigzag encoding**, **delta coordinates**, and **streaming compression**.
 
+The currently shipped writer uses v2. The proposed portable/chunked v3 design
+is tracked in [RFC 0001](rfcs/0001-portable-session-v3.md); it is not yet an
+implemented format.
+
 ---
 
 ## 1. Header Layout
