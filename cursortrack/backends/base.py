@@ -5,6 +5,14 @@ from __future__ import annotations
 import abc
 from typing import Any, Callable
 
+from cursortrack.core.layout import (
+    CoordinateUnit,
+    DesktopLayout,
+    InputCapabilities,
+    MonitorLayout,
+    Rect,
+)
+
 
 class InputBackend(abc.ABC):
     """Abstract interface defining required inputs for mouse/cursor platforms."""
@@ -49,6 +57,45 @@ class InputBackend(abc.ABC):
         """
         width, height = self.get_screen_size()
         return 0, 0, width, height
+
+    def get_layout(self) -> DesktopLayout:
+        """Return known layout facts or an explicit unknown layout.
+
+        The default synthesizes a single primary monitor from
+        ``get_screen_bounds()`` with an unknown coordinate unit. Concrete
+        backends should override when they can prove a unit or monitor list.
+        """
+        origin_x, origin_y, width, height = self.get_screen_bounds()
+        if width <= 0 or height <= 0:
+            return DesktopLayout.unknown()
+        bounds = Rect(origin_x, origin_y, width, height)
+        return DesktopLayout(
+            known=True,
+            coordinate_unit=CoordinateUnit.UNKNOWN,
+            bounds=bounds,
+            monitors=(MonitorLayout(id="primary", primary=True, bounds=bounds),),
+        )
+
+    def get_capabilities(self) -> InputCapabilities:
+        """Return coordinate, button, scroll, capture, and injection semantics.
+
+        Defaults are conservative: unknown units and no advertised injection
+        until a concrete backend overrides with verified facts.
+        """
+        layout = self.get_layout()
+        return InputCapabilities(
+            coordinate_unit=layout.coordinate_unit,
+            coordinate_unit_id=layout.coordinate_unit_id,
+            buttons=(),
+            scroll_units=(),
+            precise_scroll=False,
+            read_position=False,
+            inject_position=False,
+            inject_buttons=False,
+            inject_scroll=False,
+            capture_buttons=False,
+            capture_scroll=False,
+        )
 
     @abc.abstractmethod
     def click(self, button: str, pressed: bool) -> None:

@@ -5,12 +5,21 @@ from __future__ import annotations
 import contextlib
 import ctypes
 import ctypes.util
+import os
 import sys
 from typing import Any, Callable
 
 from cursortrack.backends._pynput_listener import verify_listener_running
 from cursortrack.backends.base import InputBackend
 from cursortrack.core.events import CAP_CLICK, CAP_SCROLL
+from cursortrack.core.layout import (
+    CoordinateUnit,
+    DesktopLayout,
+    InputCapabilities,
+    MonitorLayout,
+    Rect,
+    ScrollUnit,
+)
 
 # X11 core protocol button numbers
 BUTTON_LEFT = 1
@@ -360,6 +369,44 @@ class LinuxBackend(InputBackend):
         width = self._xlib.XDisplayWidth(self._display, self._screen)
         height = self._xlib.XDisplayHeight(self._display, self._screen)
         return int(width), int(height)
+
+    def get_layout(self) -> DesktopLayout:
+        width, height = self.get_screen_size()
+        if width <= 0 or height <= 0:
+            return DesktopLayout.unknown(
+                CoordinateUnit.BACKEND_UNIT,
+                coordinate_unit_id="x11-root-v1",
+            )
+        bounds = Rect(0, 0, width, height)
+        return DesktopLayout(
+            known=True,
+            coordinate_unit=CoordinateUnit.BACKEND_UNIT,
+            coordinate_unit_id="x11-root-v1",
+            bounds=bounds,
+            monitors=(MonitorLayout(id="x11-default-screen", primary=True, bounds=bounds),),
+        )
+
+    def get_capabilities(self) -> InputCapabilities:
+        layout = self.get_layout()
+        restrictions: list[str] = []
+        # Presence of WAYLAND_DISPLAY means we are likely on XWayland; native
+        # Wayland clients remain unreachable from this backend.
+        if os.environ.get("WAYLAND_DISPLAY"):
+            restrictions.append("xwayland-only")
+        return InputCapabilities(
+            coordinate_unit=layout.coordinate_unit,
+            coordinate_unit_id=layout.coordinate_unit_id,
+            buttons=("left", "right", "middle", "x1", "x2"),
+            scroll_units=(ScrollUnit.WHEEL_DETENT,),
+            precise_scroll=False,
+            read_position=True,
+            inject_position=True,
+            inject_buttons=True,
+            inject_scroll=True,
+            capture_buttons=True,
+            capture_scroll=True,
+            restrictions=tuple(restrictions),
+        )
 
     def click(self, button: str, pressed: bool) -> None:
         self._ensure_alive()

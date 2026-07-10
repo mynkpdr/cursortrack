@@ -41,6 +41,8 @@ The programmatic core library.
 - [layout.py](../cursortrack/core/layout.py) defines immutable coordinate-unit,
   monitor-layout, scale, and input-capability facts for the accepted v3
   portability contract. It does not enable a v3 reader/writer by itself.
+- [playback/](../cursortrack/core/playback/) implements pure compatibility
+  assessment and explicit coordinate mapping for portable replay (#50).
 - [session.py](../cursortrack/core/session.py) exposes the primary developer API `Session` for programmatically loading, editing, saving, and analyzing tracks (e.g. converting to Pandas DataFrames).
 
 ### `cursortrack/backends/`

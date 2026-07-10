@@ -48,8 +48,8 @@ replay safely across different monitor layouts, origins, scales, or coordinate
 units.
 
 ### Key Tasks:
-1. Review and accept [RFC 0001](docs/rfcs/0001-portable-session-v3.md).
+1. Review and accept [RFC 0001](docs/rfcs/0001-portable-session-v3.md). ✅
 2. Add v3 source-layout metadata, length-framed events, and independently
    checksummed compression chunks while preserving v1/v2 readers.
-3. Add a no-injection compatibility preview and strict mismatch detection.
-4. Add explicit, opt-in coordinate mapping modes; never silently scale or clamp.
+3. Add a no-injection compatibility preview and strict mismatch detection. ✅ (#50)
+4. Add explicit, opt-in coordinate mapping modes; never silently scale or clamp. ✅ (#50)
