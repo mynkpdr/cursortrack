@@ -736,6 +736,103 @@ def test_export_refuses_same_path_as_input() -> None:
             assert f.read() == original_contents
 
 
+def test_export_normalizes_npy_suffix_before_overwrite_checks() -> None:
+    """An implicit .npy suffix must not bypass overwrite protection."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        session_file = os.path.join(tmpdir, "session.ctrk")
+        record_res = runner.invoke(
+            app,
+            [
+                "record",
+                "-o",
+                session_file,
+                "--backend",
+                "mock",
+                "--seconds",
+                "0.1",
+                "--codec",
+                "raw",
+                "--no-spin",
+                "-q",
+            ],
+        )
+        assert record_res.exit_code == 0
+
+        requested_path = os.path.join(tmpdir, "analysis")
+        actual_path = f"{requested_path}.npy"
+        with open(actual_path, "wb") as f:
+            f.write(b"pre-existing numpy contents")
+
+        result = runner.invoke(
+            app,
+            ["export", session_file, "--to", "npy", "--out", requested_path],
+        )
+
+        assert result.exit_code == 1
+        assert "Refusing to overwrite" in " ".join(result.output.split())
+        with open(actual_path, "rb") as f:
+            assert f.read() == b"pre-existing numpy contents"
+
+        force_result = runner.invoke(
+            app,
+            ["export", session_file, "--to", "npy", "--out", requested_path, "--force"],
+        )
+        assert force_result.exit_code == 0
+        assert actual_path in force_result.output
+        with open(actual_path, "rb") as f:
+            assert f.read() != b"pre-existing numpy contents"
+
+
+def test_export_refuses_implicit_npy_suffix_that_aliases_input() -> None:
+    """`--out track` must be recognized as the existing input `track.npy`."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        session_file = os.path.join(tmpdir, "session.ctrk")
+        record_res = runner.invoke(
+            app,
+            [
+                "record",
+                "-o",
+                session_file,
+                "--backend",
+                "mock",
+                "--seconds",
+                "0.1",
+                "--codec",
+                "raw",
+                "--no-spin",
+                "-q",
+            ],
+        )
+        assert record_res.exit_code == 0
+
+        npy_file = os.path.join(tmpdir, "track.npy")
+        export_res = runner.invoke(
+            app,
+            ["export", session_file, "--to", "npy", "--out", npy_file],
+        )
+        assert export_res.exit_code == 0
+        with open(npy_file, "rb") as f:
+            original_contents = f.read()
+
+        result = runner.invoke(
+            app,
+            [
+                "export",
+                npy_file,
+                "--to",
+                "npy",
+                "--out",
+                os.path.join(tmpdir, "track"),
+                "--force",
+            ],
+        )
+
+        assert result.exit_code == 1
+        assert "same file as the input" in " ".join(result.output.split())
+        with open(npy_file, "rb") as f:
+            assert f.read() == original_contents
+
+
 def test_play_loop_runs_multiple_passes_before_failsafe_stops_it() -> None:
     """--loop should replay the session again after finishing, not just play it once."""
     with tempfile.TemporaryDirectory() as tmpdir:

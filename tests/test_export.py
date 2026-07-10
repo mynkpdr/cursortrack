@@ -103,6 +103,19 @@ def test_npy_export_of_empty_session_reloads_cleanly(tmp_path: object) -> None:
     assert reloaded.events == []
 
 
+def test_npy_export_uses_the_exact_library_destination(tmp_path: object) -> None:
+    """The exporter must not mutate a caller-owned path after safety checks."""
+    pytest.importorskip("numpy")
+    session = _sample_session()
+    out_path = str(tmp_path) + "/exact-destination"
+
+    count = export_to_npy(session, out_path)
+
+    assert count == len(session.events)
+    assert os.path.exists(out_path)
+    assert not os.path.exists(f"{out_path}.npy")
+
+
 def test_jsonl_export_and_reload(tmp_path: object) -> None:
     """Verify .jsonl export writes all events and reload preserves payload values."""
     session = _sample_session()
