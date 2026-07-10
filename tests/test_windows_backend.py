@@ -16,9 +16,17 @@ from typing import Any
 import pytest
 
 from cursortrack.backends.windows import (
+    INPUT,
+    INPUT_MOUSE,
+    MOUSEEVENTF_HWHEEL,
+    MOUSEEVENTF_LEFTDOWN,
+    MOUSEEVENTF_WHEEL,
+    MOUSEEVENTF_XUP,
     POINT,
     SM_CXVIRTUALSCREEN,
     SM_CYVIRTUALSCREEN,
+    WHEEL_DELTA,
+    XBUTTON2,
     WindowsBackend,
     _declare_prototypes,
     _enable_dpi_awareness,
@@ -98,7 +106,7 @@ def test_declare_prototypes_sets_explicit_bool_restype_for_position_calls() -> N
         (),
         {
             name: type(name, (), {})()
-            for name in ("GetCursorPos", "SetCursorPos", "GetSystemMetrics", "mouse_event")
+            for name in ("GetCursorPos", "SetCursorPos", "GetSystemMetrics", "SendInput")
         },
     )()
 
@@ -110,7 +118,56 @@ def test_declare_prototypes_sets_explicit_bool_restype_for_position_calls() -> N
     assert dummy.SetCursorPos.argtypes == [ctypes.c_int, ctypes.c_int]
     assert dummy.GetSystemMetrics.restype is ctypes.c_int
     assert dummy.GetSystemMetrics.argtypes == [ctypes.c_int]
-    assert dummy.mouse_event.argtypes[:4] == [ctypes.c_ulong] * 4
+    assert dummy.SendInput.restype is ctypes.c_uint32
+    assert dummy.SendInput.argtypes == [
+        ctypes.c_uint32,
+        ctypes.POINTER(INPUT),
+        ctypes.c_int,
+    ]
+
+
+class _FakeSendInput:
+    def __init__(self, succeed: bool = True) -> None:
+        self.succeed = succeed
+        self.events: list[tuple[int, int, int]] = []
+
+    def SendInput(self, count: int, inputs: Any, size: int) -> int:  # noqa: N802
+        assert size == ctypes.sizeof(INPUT)
+        event_array = ctypes.cast(inputs, ctypes.POINTER(INPUT))
+        for index in range(count):
+            event = event_array[index]
+            self.events.append((event.type, event.mi.dwFlags, event.mi.mouseData))
+        return count if self.succeed else 0
+
+
+def _backend_with_fake_send_input(fake: _FakeSendInput) -> WindowsBackend:
+    backend = object.__new__(WindowsBackend)
+    backend._user32 = fake
+    backend._listener = None
+    return backend
+
+
+def test_click_and_scroll_use_send_input() -> None:
+    user32 = _FakeSendInput()
+    backend = _backend_with_fake_send_input(user32)
+
+    backend.click("left", True)
+    backend.click("x2", False)
+    backend.scroll(-2, 3)
+
+    assert user32.events == [
+        (INPUT_MOUSE, MOUSEEVENTF_LEFTDOWN, 0),
+        (INPUT_MOUSE, MOUSEEVENTF_XUP, XBUTTON2),
+        (INPUT_MOUSE, MOUSEEVENTF_WHEEL, 3 * WHEEL_DELTA),
+        (INPUT_MOUSE, MOUSEEVENTF_HWHEEL, (-2 * WHEEL_DELTA) & 0xFFFFFFFF),
+    ]
+
+
+def test_send_input_failure_is_reported() -> None:
+    backend = _backend_with_fake_send_input(_FakeSendInput(succeed=False))
+
+    with pytest.raises(OSError, match="SendInput"):
+        backend.click("left", True)
 
 
 def test_dpi_awareness_is_verified_only_for_per_monitor_v2() -> None:
