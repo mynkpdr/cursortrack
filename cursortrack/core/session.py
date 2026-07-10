@@ -3,12 +3,22 @@
 from __future__ import annotations
 
 import json
+import math
 import os
+from dataclasses import dataclass
 from typing import Any
 
-from cursortrack.core.codec import decompress_tolerant
+from cursortrack.core.codec import (
+    CODEC_NAME,
+    DEFAULT_MAX_DECOMPRESSED_BYTES,
+    DecompressionStatus,
+    decompress_with_status,
+)
 from cursortrack.core.events import (
     BUTTON_NAME,
+    DEFAULT_MAX_ABS_COORDINATE,
+    DEFAULT_MAX_EVENTS,
+    DEFAULT_MAX_FRAME,
     ButtonEvent,
     InputEvent,
     MoveEvent,
@@ -18,6 +28,37 @@ from cursortrack.core.events import (
     decode_positions_v1,
 )
 from cursortrack.core.format import read_header
+
+DEFAULT_MAX_COMPRESSED_BYTES = 256 * 1024 * 1024
+
+
+@dataclass(frozen=True)
+class DecodeLimits:
+    """Resource limits applied when loading an untrusted binary session."""
+
+    max_compressed_bytes: int = DEFAULT_MAX_COMPRESSED_BYTES
+    max_decompressed_bytes: int = DEFAULT_MAX_DECOMPRESSED_BYTES
+    max_events: int = DEFAULT_MAX_EVENTS
+    max_frame: int = DEFAULT_MAX_FRAME
+    max_abs_coordinate: int = DEFAULT_MAX_ABS_COORDINATE
+
+    def __post_init__(self) -> None:
+        for name, value in vars(self).items():
+            if value < 1:
+                raise ValueError(f"{name} must be positive.")
+
+
+def _validate_binary_header(header: dict[str, Any]) -> None:
+    codec = int(header["codec"])
+    if codec not in CODEC_NAME:
+        raise ValueError(f"Unknown codec ID {codec} in session header.")
+    rate = int(header["rate"])
+    if not 1 <= rate <= 65535:
+        raise ValueError(f"Session sample rate must be 1..65535 Hz; got {rate}.")
+    if int(header["scr_w"]) < 0 or int(header["scr_h"]) < 0:
+        raise ValueError("Session screen dimensions cannot be negative.")
+    if not math.isfinite(float(header["start"])):
+        raise ValueError("Session start time must be finite.")
 
 
 class Session:
@@ -29,11 +70,15 @@ class Session:
         events: list[InputEvent],
         file_path: str | None = None,
         truncated: bool = False,
+        integrity: str | None = None,
     ):
         self.header = header
         self.events = events
         self.file_path = file_path
-        self.truncated = truncated
+        self.integrity = integrity or ("truncated" if truncated else "complete")
+        if self.integrity not in {"complete", "truncated", "corrupt-recovered"}:
+            raise ValueError(f"Unknown session integrity state: {self.integrity}")
+        self.truncated = truncated or self.integrity != "complete"
 
     @property
     def version(self) -> int:
@@ -64,7 +109,7 @@ class Session:
         return int(self.header.get("capture", 1))
 
     @classmethod
-    def load(cls, path: str) -> Session:
+    def load(cls, path: str, limits: DecodeLimits | None = None) -> Session:
         """Load a session recording from a binary .ctrk/.curmov, .npy, or .jsonl file."""
         if not os.path.exists(path):
             raise FileNotFoundError(f"Session file not found: {path}")
@@ -74,24 +119,57 @@ class Session:
         elif path.endswith(".jsonl"):
             return cls.load_jsonl(path)
         else:
-            return cls.load_binary(path)
+            return cls.load_binary(path, limits=limits)
 
     @classmethod
-    def load_binary(cls, path: str) -> Session:
+    def load_binary(cls, path: str, limits: DecodeLimits | None = None) -> Session:
         """Load from a binary format file (.ctrk / .curmov)."""
+        active_limits = limits or DecodeLimits()
         with open(path, "rb") as f:
             header, leftover = read_header(f)
-            blob = leftover + f.read()
+            _validate_binary_header(header)
+            remaining = active_limits.max_compressed_bytes - len(leftover)
+            blob = leftover + f.read(max(0, remaining) + 1)
+        if len(blob) > active_limits.max_compressed_bytes:
+            raise ValueError(
+                "Session compressed body exceeds the configured limit of "
+                f"{active_limits.max_compressed_bytes} bytes."
+            )
 
-        body = decompress_tolerant(blob, header["codec"])
+        decompressed = decompress_with_status(
+            blob,
+            header["codec"],
+            max_output_bytes=active_limits.max_decompressed_bytes,
+        )
+        body = decompressed.data
 
         events: list[InputEvent]
         if header["version"] == 1:
-            events, truncated = decode_positions_v1(header["x0"], header["y0"], body)
+            events, event_truncated = decode_positions_v1(
+                header["x0"],
+                header["y0"],
+                body,
+                active_limits.max_events,
+                active_limits.max_frame,
+                active_limits.max_abs_coordinate,
+            )
         else:
-            events, truncated = decode_events_v2(header["x0"], header["y0"], body)
+            events, event_truncated = decode_events_v2(
+                header["x0"],
+                header["y0"],
+                body,
+                active_limits.max_events,
+                active_limits.max_frame,
+                active_limits.max_abs_coordinate,
+            )
 
-        return cls(header, events, path, truncated=truncated)
+        if decompressed.status is DecompressionStatus.CORRUPT_RECOVERED:
+            integrity = "corrupt-recovered"
+        elif decompressed.status is DecompressionStatus.TRUNCATED or event_truncated:
+            integrity = "truncated"
+        else:
+            integrity = "complete"
+        return cls(header, events, path, integrity=integrity)
 
     @classmethod
     def load_jsonl(cls, path: str) -> Session:

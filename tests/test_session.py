@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import io
 import struct
 
-from cursortrack.core.codec import CODEC_RAW, write_uvarint
+import pytest
+
+from cursortrack.core.codec import CODEC_RAW, CODEC_ZLIB, CodecWriter, write_uvarint
 from cursortrack.core.events import (
     ButtonEvent,
     InputEvent,
@@ -21,7 +24,7 @@ from cursortrack.core.format import (
     pack_header,
     read_header,
 )
-from cursortrack.core.session import Session
+from cursortrack.core.session import DecodeLimits, Session
 
 
 def test_header_serialization() -> None:
@@ -218,3 +221,111 @@ def test_session_default_truncated_is_false() -> None:
     }
     session = Session(header, [MoveEvent(frame=0, x=0, y=0)])
     assert session.truncated is False
+    assert session.integrity == "complete"
+
+
+def test_unfinalized_compression_marks_session_truncated_at_event_boundary(
+    tmp_path: object,
+) -> None:
+    """Compression truncation must survive even when all recovered events decode cleanly."""
+    body = bytearray()
+    encode_move(body, 1, 5, 5)
+
+    compressed = io.BytesIO()
+    writer = CodecWriter(compressed, CODEC_ZLIB, level=6)
+    writer.write(bytes(body))
+    writer.flush()
+
+    path = str(tmp_path) + "/unfinalized.ctrk"
+    header = pack_header(
+        codec=CODEC_ZLIB,
+        rate=144,
+        scr_w=1920,
+        scr_h=1080,
+        start=1000.0,
+        x0=100,
+        y0=200,
+        capture=15,
+    )
+    with open(path, "wb") as f:
+        f.write(header + compressed.getvalue())
+    writer.close()
+
+    session = Session.load(path)
+
+    assert len(session.events) == 2
+    assert session.truncated is True
+    assert session.integrity == "truncated"
+
+
+def test_binary_load_enforces_compressed_size_limit(tmp_path: object) -> None:
+    path = str(tmp_path) + "/oversized.ctrk"
+    _write_v2_file(path, b"\x00\x00\x00")
+
+    with pytest.raises(ValueError, match="compressed body exceeds"):
+        Session.load_binary(
+            path,
+            limits=DecodeLimits(max_compressed_bytes=2),
+        )
+
+
+def test_binary_load_enforces_event_count_limit(tmp_path: object) -> None:
+    body = bytearray()
+    encode_move(body, 1, 1, 1)
+    encode_move(body, 1, 1, 1)
+    path = str(tmp_path) + "/too-many-events.ctrk"
+    _write_v2_file(path, bytes(body))
+
+    with pytest.raises(ValueError, match="event count exceeds"):
+        Session.load_binary(path, limits=DecodeLimits(max_events=2))
+
+
+def test_binary_load_allows_exact_event_count_limit(tmp_path: object) -> None:
+    body = bytearray()
+    encode_move(body, 1, 1, 1)
+    path = str(tmp_path) + "/exact-event-limit.ctrk"
+    _write_v2_file(path, bytes(body))
+
+    session = Session.load_binary(path, limits=DecodeLimits(max_events=2))
+
+    assert len(session.events) == 2
+
+
+def test_binary_load_enforces_frame_and_coordinate_limits(tmp_path: object) -> None:
+    frame_body = bytearray()
+    encode_move(frame_body, 11, 0, 0)
+    frame_path = str(tmp_path) + "/frame-limit.ctrk"
+    _write_v2_file(frame_path, bytes(frame_body))
+
+    with pytest.raises(ValueError, match="frame exceeds"):
+        Session.load_binary(frame_path, limits=DecodeLimits(max_frame=10))
+
+    coordinate_body = bytearray()
+    encode_move(coordinate_body, 1, 11, 0)
+    coordinate_path = str(tmp_path) + "/coordinate-limit.ctrk"
+    _write_v2_file(coordinate_path, bytes(coordinate_body))
+
+    with pytest.raises(ValueError, match="coordinate exceeds"):
+        Session.load_binary(
+            coordinate_path,
+            limits=DecodeLimits(max_abs_coordinate=10),
+        )
+
+
+def test_binary_load_rejects_invalid_header_values(tmp_path: object) -> None:
+    path = str(tmp_path) + "/invalid-rate.ctrk"
+    header = pack_header(
+        codec=CODEC_RAW,
+        rate=0,
+        scr_w=1920,
+        scr_h=1080,
+        start=1000.0,
+        x0=0,
+        y0=0,
+        capture=1,
+    )
+    with open(path, "wb") as f:
+        f.write(header)
+
+    with pytest.raises(ValueError, match="sample rate"):
+        Session.load_binary(path)

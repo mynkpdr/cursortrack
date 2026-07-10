@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import contextlib
-import io
 import os
 import zlib
-from typing import BinaryIO
+from dataclasses import dataclass
+from enum import Enum
+from typing import BinaryIO, Protocol
 
 # Codec constants
 CODEC_RAW = 0
@@ -18,6 +19,37 @@ CODEC_NAME: dict[int, str] = {
     CODEC_ZSTD: "zstd",
     CODEC_ZLIB: "zlib",
 }
+
+MAX_UVARINT_BYTES = 10
+MAX_UVARINT = (1 << 64) - 1
+DEFAULT_MAX_DECOMPRESSED_BYTES = 512 * 1024 * 1024
+
+
+class DecompressionStatus(str, Enum):
+    """Integrity state of a decoded compression stream."""
+
+    COMPLETE = "complete"
+    TRUNCATED = "truncated"
+    CORRUPT_RECOVERED = "corrupt-recovered"
+
+
+@dataclass(frozen=True)
+class DecompressionResult:
+    """Recovered bytes and the compression stream's integrity state."""
+
+    data: bytes
+    status: DecompressionStatus
+
+
+class _ZlibDecompressor(Protocol):
+    @property
+    def unconsumed_tail(self) -> bytes:
+        """Compressed input not consumed because an output limit was reached."""
+        ...
+
+    def decompress(self, data: bytes, max_length: int = 0) -> bytes:
+        """Return decompressed bytes while retaining streaming state."""
+        ...
 
 
 def zigzag_encode(n: int) -> int:
@@ -39,6 +71,8 @@ def write_uvarint(buf: bytearray, u: int) -> None:
             f"write_uvarint requires a non-negative integer (got {u}); "
             "use write_svarint for signed values."
         )
+    if u > MAX_UVARINT:
+        raise ValueError(f"write_uvarint value exceeds the uint64 range: {u}")
     while True:
         b = u & 0x7F
         u >>= 7
@@ -55,18 +89,21 @@ def read_uvarint(buf: bytes | bytearray, pos: int) -> tuple[int, int, bool]:
     Returns:
         (value, new_pos, ok) where ok=False means a truncated trailing varint.
     """
-    shift = 0
     result = 0
     n = len(buf)
-    while True:
+    for byte_index in range(MAX_UVARINT_BYTES):
         if pos >= n:
             return 0, pos, False
         b = buf[pos]
         pos += 1
-        result |= (b & 0x7F) << shift
+        if byte_index == MAX_UVARINT_BYTES - 1 and b > 1:
+            raise ValueError(
+                f"Unsigned varint exceeds {MAX_UVARINT_BYTES} bytes or the uint64 range."
+            )
+        result |= (b & 0x7F) << (byte_index * 7)
         if not (b & 0x80):
             return result, pos, True
-        shift += 7
+    raise ValueError(f"Unsigned varint exceeds {MAX_UVARINT_BYTES} bytes.")
 
 
 def write_svarint(buf: bytearray, n: int) -> None:
@@ -141,25 +178,46 @@ class CodecWriter:
             os.fsync(self.f.fileno())
 
 
-def decompress_tolerant(blob: bytes, codec: int) -> bytes:
-    """Decompress a (possibly unfinalized / truncated) body, keeping all valid decompressed bytes."""
+def _check_output_limit(size: int, max_output_bytes: int) -> None:
+    if size > max_output_bytes:
+        raise ValueError(
+            f"Decompressed data exceeds the configured limit of {max_output_bytes} bytes."
+        )
+
+
+def decompress_with_status(
+    blob: bytes,
+    codec: int,
+    max_output_bytes: int = DEFAULT_MAX_DECOMPRESSED_BYTES,
+) -> DecompressionResult:
+    """Recover a compression stream prefix while reporting its integrity."""
+    if max_output_bytes < 1:
+        raise ValueError("max_output_bytes must be positive.")
+
     if codec == CODEC_RAW:
-        return blob
+        _check_output_limit(len(blob), max_output_bytes)
+        return DecompressionResult(blob, DecompressionStatus.COMPLETE)
     if codec == CODEC_ZSTD:
         try:
             import zstandard as zstd
 
-            out = bytearray()
-            reader = zstd.ZstdDecompressor().stream_reader(io.BytesIO(blob))
+            zstd_out = bytearray()
+            decompressor = zstd.ZstdDecompressor().decompressobj()
+            status = DecompressionStatus.COMPLETE
             try:
-                while True:
-                    chunk = reader.read(1 << 20)
-                    if not chunk:
-                        break
-                    out += chunk
+                for offset in range(0, len(blob), 1 << 16):
+                    zstd_out += decompressor.decompress(blob[offset : offset + (1 << 16)])
+                    _check_output_limit(len(zstd_out), max_output_bytes)
+                zstd_out += decompressor.flush()
+                _check_output_limit(len(zstd_out), max_output_bytes)
             except zstd.ZstdError:
-                pass
-            return bytes(out)
+                status = DecompressionStatus.CORRUPT_RECOVERED
+            else:
+                if decompressor.unused_data:
+                    status = DecompressionStatus.CORRUPT_RECOVERED
+                elif not decompressor.eof:
+                    status = DecompressionStatus.TRUNCATED
+            return DecompressionResult(bytes(zstd_out), status)
         except ImportError:
             # Fallback block in case zstd is missing on read (should be caught by validation,
             # but provide fallback for robustness).
@@ -169,14 +227,47 @@ def decompress_tolerant(blob: bytes, codec: int) -> bytes:
         try:
             # Fast path: intact or merely truncated streams decode in one call
             # (truncation does not raise; it just ends the output early).
-            return d.decompress(blob)
+            zlib_out = d.decompress(blob, max_output_bytes + 1)
+            _check_output_limit(len(zlib_out), max_output_bytes)
+            if d.unconsumed_tail:
+                _check_output_limit(max_output_bytes + 1, max_output_bytes)
+            if d.unused_data:
+                status = DecompressionStatus.CORRUPT_RECOVERED
+            else:
+                status = DecompressionStatus.COMPLETE if d.eof else DecompressionStatus.TRUNCATED
+            return DecompressionResult(zlib_out, status)
         except zlib.error:
             pass
-        return _recover_corrupt_zlib(blob)
+        return DecompressionResult(
+            _recover_corrupt_zlib(blob, max_output_bytes),
+            DecompressionStatus.CORRUPT_RECOVERED,
+        )
     raise ValueError(f"Unknown codec ID {codec}")
 
 
-def _recover_corrupt_zlib(blob: bytes) -> bytes:
+def decompress_tolerant(
+    blob: bytes,
+    codec: int,
+    max_output_bytes: int = DEFAULT_MAX_DECOMPRESSED_BYTES,
+) -> bytes:
+    """Decompress a possibly damaged stream, returning its valid prefix."""
+    return decompress_with_status(blob, codec, max_output_bytes).data
+
+
+def _decompress_zlib_chunk(
+    decompressor: _ZlibDecompressor,
+    data: bytes,
+    produced: int,
+    max_output_bytes: int,
+) -> bytes:
+    chunk = decompressor.decompress(data, max_output_bytes - produced + 1)
+    _check_output_limit(produced + len(chunk), max_output_bytes)
+    if decompressor.unconsumed_tail:
+        _check_output_limit(max_output_bytes + 1, max_output_bytes)
+    return chunk
+
+
+def _recover_corrupt_zlib(blob: bytes, max_output_bytes: int) -> bytes:
     """Salvage the longest decodable prefix of a mid-stream-corrupted zlib body.
 
     zlib discards *all* output produced by the decompress() call that raises,
@@ -187,19 +278,26 @@ def _recover_corrupt_zlib(blob: bytes) -> bytes:
     step = 1 << 12
     d = zlib.decompressobj()
     fail_at = 0
+    produced = 0
     while fail_at < len(blob):
         try:
-            d.decompress(blob[fail_at : fail_at + step])
+            chunk = _decompress_zlib_chunk(
+                d,
+                blob[fail_at : fail_at + step],
+                produced,
+                max_output_bytes,
+            )
         except zlib.error:
             break
+        produced += len(chunk)
         fail_at += step
 
     d = zlib.decompressobj()
     out = bytearray()
     try:
-        out += d.decompress(blob[:fail_at])
+        out += _decompress_zlib_chunk(d, blob[:fail_at], len(out), max_output_bytes)
         for i in range(fail_at, min(fail_at + step, len(blob))):
-            out += d.decompress(blob[i : i + 1])
+            out += _decompress_zlib_chunk(d, blob[i : i + 1], len(out), max_output_bytes)
     except zlib.error:
         pass
     return bytes(out)

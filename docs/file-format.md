@@ -117,16 +117,46 @@ The 8-byte magic string (`CURMOV0<N>`) is the format's compatibility contract. I
 - Changing the meaning of an existing event tag's fields, or changing how `dframes`/deltas are computed.
 - Removing support for decoding an older magic version.
 
-**Does NOT require a version bump** (safe, backward-compatible additions):
-- Adding a **new event tag** with a value not previously used (readers must already treat unknown tags as a hard stop — see `iter_events_v2`, which is intentionally conservative rather than silently skipping unknown bytes).
-- Adding a new codec ID to `CODEC_NAME`, as long as `CODEC_RAW`/`CODEC_ZSTD`/`CODEC_ZLIB` values are unchanged.
+**Does NOT require a version bump**:
 - New CLI flags, export formats, or library APIs that don't touch the on-disk byte layout.
+
+Adding an event tag to v2 is **not** forward-compatible: events do not carry
+their encoded length, so an older reader cannot skip an unknown tag and safely
+find the next event. A future extensible format must frame each event before new
+tags can be added without a new magic/version. New codec IDs similarly require
+reader support and cause older readers to fail clearly rather than decode them
+incorrectly.
 
 **Compatibility guarantee**: every version of `cursortrack` commits to being able to *read* every magic version that has ever shipped (v1 included). Writing is always done in the latest format. There is no plan to drop v1 read support — the parsing cost of an extra branch in `read_header()` is negligible against the cost of silently orphaning old recordings.
 
 ---
 
-## 6. Interchange Export Schemas (JSONL / NumPy)
+## 6. Decoder Safety and Integrity
+
+Binary sessions are treated as untrusted input. Default `Session.load()` limits
+the compressed body to 256 MiB, decompressed body to 512 MiB, event count to
+5,000,000, frame values to signed 64-bit range, coordinates/scroll deltas to
+signed 32-bit magnitude, and varints to the 10-byte `uint64` representation.
+These limits prevent malformed recordings and compression bombs from consuming
+resources without bound.
+
+Trusted applications that intentionally process larger files can pass a custom
+`DecodeLimits` instance to `Session.load()` or `Session.load_binary()`.
+
+`Session.integrity` reports one of:
+
+- `complete`: the compression frame and event stream ended normally.
+- `truncated`: an unfinalized compression frame or partial event tail was recovered.
+- `corrupt-recovered`: corruption was detected and the longest safe prefix was recovered.
+
+`Session.truncated` remains the backward-compatible boolean and is true for
+both non-complete states. Invalid headers, oversized data, overlong varints, and
+events outside configured limits raise `ValueError` instead of being treated as
+recoverable truncation.
+
+---
+
+## 7. Interchange Export Schemas (JSONL / NumPy)
 
 Unlike the binary `.ctrk` format, the JSONL and `.npy` exports are flat, ML-friendly interchange formats rather than a versioned wire protocol — there is no magic byte or version field. `Session.load()` re-parses them by file extension. To make that round trip lossless, both formats repeat the session's rate/screen/capture metadata **on every row**, since it's constant across the file and this keeps each row/line self-describing even if only part of the file is read.
 
