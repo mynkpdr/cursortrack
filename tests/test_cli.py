@@ -9,6 +9,7 @@ import time
 from typing import Any, Callable, ClassVar
 from unittest import mock
 
+import pytest
 from typer.testing import CliRunner
 
 from cursortrack.backends import BACKEND_CLASSES
@@ -264,6 +265,52 @@ class ButtonCornerAbortBackend(InputBackend):
 
     def stop_listening(self) -> None:
         pass
+
+
+class MidRecordingFailureBackend(InputBackend):
+    """Provide an initial position, then fail while the sampling loop is active."""
+
+    fail_after_reads: ClassVar[int] = 3
+
+    def __init__(self) -> None:
+        self.reads = 0
+
+    def read_position(self) -> tuple[int, int]:
+        self.reads += 1
+        if self.reads > type(self).fail_after_reads:
+            raise OSError("display connection lost")
+        return (500 + self.reads, 500)
+
+    def set_position(self, x: int, y: int) -> None:
+        pass
+
+    def get_screen_size(self) -> tuple[int, int]:
+        return (1920, 1080)
+
+    def click(self, button: str, pressed: bool) -> None:
+        pass
+
+    def scroll(self, sdx: int, sdy: int) -> None:
+        pass
+
+    def start_listening(
+        self, on_event: Callable[[str, tuple[Any, ...], float], None], capture_mask: int
+    ) -> None:
+        pass
+
+    def stop_listening(self) -> None:
+        pass
+
+
+class RecordingOrderBackend(MidRecordingFailureBackend):
+    """Log reads so countdown ordering can be asserted without wall-clock delays."""
+
+    log: ClassVar[list[str]] = []
+    fail_after_reads = 10_000
+
+    def read_position(self) -> tuple[int, int]:
+        type(self).log.append("read")
+        return super().read_position()
 
 
 def _write_raw_button_session(path: str, gap_frames: int, include_up: bool = True) -> None:
@@ -1254,3 +1301,165 @@ def test_play_interrupts_long_wait_and_releases_button_on_corner(tmp_path: objec
     assert elapsed < 0.3
     assert "Fail-safe triggered" in result.output
     assert ButtonCornerAbortBackend.clicks == [("left", True), ("left", False)]
+
+
+def test_record_fails_before_creating_file_when_initial_position_is_unavailable(
+    tmp_path: object,
+) -> None:
+    destination = str(tmp_path) + "/initial-failure.ctrk"
+    BACKEND_CLASSES["mock"] = FailingSafetyBackend
+
+    result = runner.invoke(
+        app,
+        [
+            "record",
+            "--out",
+            destination,
+            "--backend",
+            "mock",
+            "--seconds",
+            "0.1",
+            "--codec",
+            "raw",
+            "--no-spin",
+            "--quiet",
+            "--delay",
+            "0",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "initial cursor position" in result.output
+    assert not os.path.exists(destination)
+
+
+def test_record_surfaces_mid_session_position_failure_as_truncated_prefix(
+    tmp_path: object,
+) -> None:
+    destination = str(tmp_path) + "/mid-session-failure.ctrk"
+    MidRecordingFailureBackend.fail_after_reads = 3
+    BACKEND_CLASSES["mock"] = MidRecordingFailureBackend
+
+    result = runner.invoke(
+        app,
+        [
+            "record",
+            "--out",
+            destination,
+            "--backend",
+            "mock",
+            "--seconds",
+            "1",
+            "--hz",
+            "20",
+            "--codec",
+            "raw",
+            "--no-spin",
+            "--quiet",
+            "--delay",
+            "0",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "cursor position read failed" in result.output
+    assert "Recording complete" not in result.output
+    recovered = Session.load(destination)
+    assert recovered.truncated is True
+    assert len(recovered.events) >= 2
+
+
+def test_failed_forced_recording_keeps_existing_file_on_backend_loss(tmp_path: object) -> None:
+    destination = str(tmp_path) + "/existing.ctrk"
+    with open(destination, "wb") as f:
+        f.write(b"valid existing recording")
+    MidRecordingFailureBackend.fail_after_reads = 2
+    BACKEND_CLASSES["mock"] = MidRecordingFailureBackend
+
+    result = runner.invoke(
+        app,
+        [
+            "record",
+            "--out",
+            destination,
+            "--backend",
+            "mock",
+            "--seconds",
+            "1",
+            "--codec",
+            "raw",
+            "--no-spin",
+            "--quiet",
+            "--delay",
+            "0",
+            "--force",
+        ],
+    )
+
+    assert result.exit_code == 1
+    with open(destination, "rb") as f:
+        assert f.read() == b"valid existing recording"
+
+
+def test_record_quiet_still_honors_countdown_before_reading_position(tmp_path: object) -> None:
+    destination = str(tmp_path) + "/quiet-countdown.ctrk"
+    RecordingOrderBackend.log = []
+    BACKEND_CLASSES["mock"] = RecordingOrderBackend
+
+    def fake_sleep(seconds: float) -> None:
+        RecordingOrderBackend.log.append(f"sleep:{seconds}")
+
+    with (
+        mock.patch("cursortrack.cli.record.time.sleep", side_effect=fake_sleep),
+        mock.patch("cursortrack.cli.record.precise_wait"),
+    ):
+        result = runner.invoke(
+            app,
+            [
+                "record",
+                "--out",
+                destination,
+                "--backend",
+                "mock",
+                "--seconds",
+                "0.1",
+                "--hz",
+                "10",
+                "--codec",
+                "raw",
+                "--no-spin",
+                "--quiet",
+                "--delay",
+                "3",
+            ],
+        )
+
+    assert result.exit_code == 0
+    assert RecordingOrderBackend.log[:4] == ["sleep:1", "sleep:1", "sleep:1", "read"]
+
+
+@pytest.mark.parametrize(
+    ("option", "value", "message"),
+    [
+        ("--hours", "-1", "duration values cannot be negative"),
+        ("--minutes", "-1", "duration values cannot be negative"),
+        ("--seconds", "-1", "duration values cannot be negative"),
+        ("--flush-secs", "0", "flush-secs must be greater than 0"),
+        ("--delay", "-1", "delay cannot be negative"),
+    ],
+)
+def test_record_rejects_invalid_timing_options(option: str, value: str, message: str) -> None:
+    result = runner.invoke(
+        app,
+        [
+            "record",
+            "--backend",
+            "mock",
+            option,
+            value,
+            "--quiet",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert message in result.output

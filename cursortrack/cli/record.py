@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import math
 import os
 import queue
 import signal
@@ -227,6 +228,23 @@ def record(
     global _STOP
     _STOP = False
 
+    duration_values = (hours, minutes, seconds)
+    if not all(math.isfinite(value) for value in duration_values):
+        console.print("[bold red]Error:[/bold red] --hours/--minutes/--seconds must be finite.")
+        raise typer.Exit(code=1)
+    if any(value < 0 for value in duration_values):
+        console.print(
+            "[bold red]Error:[/bold red] --hours/--minutes/--seconds duration values "
+            "cannot be negative."
+        )
+        raise typer.Exit(code=1)
+    if not math.isfinite(flush_secs) or flush_secs <= 0:
+        console.print("[bold red]Error:[/bold red] --flush-secs must be greater than 0.")
+        raise typer.Exit(code=1)
+    if delay < 0:
+        console.print("[bold red]Error:[/bold red] --delay cannot be negative.")
+        raise typer.Exit(code=1)
+
     capture = parse_capture_arg(capture_flags)
     codec = resolve_codec(codec_name)
 
@@ -267,7 +285,11 @@ def record(
         console.print(f"[bold red]Error resolving backend:[/bold red] {e}")
         raise typer.Exit(code=1)
 
-    scr_w, scr_h = backend.get_screen_size()
+    try:
+        scr_w, scr_h = backend.get_screen_size()
+    except Exception as e:
+        console.print(f"[bold red]Failed to read screen size:[/bold red] {e}")
+        raise typer.Exit(code=1)
 
     # Wire signals
     for sig in (getattr(signal, "SIGINT", None), getattr(signal, "SIGTERM", None)):
@@ -275,18 +297,27 @@ def record(
             with contextlib.suppress(ValueError, OSError):
                 signal.signal(sig, _on_signal)
 
-    # Countdown delay before recording starts
-    if not quiet and delay > 0:
-        for sec in range(delay, 0, -1):
-            if _STOP:
-                raise typer.Exit(code=0)
-            console.print(f"Recording starting in {sec}... (Ctrl+C to abort)")
-            try:
+    # Countdown delay before recording starts. Quiet mode suppresses only the
+    # messages, never the requested safety delay.
+    if delay > 0:
+        try:
+            for sec in range(delay, 0, -1):
+                if _STOP:
+                    raise typer.Exit(code=130)
+                if not quiet:
+                    console.print(f"Recording starting in {sec}... (Ctrl+C to abort)")
                 time.sleep(1)
-            except KeyboardInterrupt:
-                raise typer.Exit(code=0) from None
+        except KeyboardInterrupt:
+            raise typer.Exit(code=130) from None
         if _STOP:
-            raise typer.Exit(code=0)
+            raise typer.Exit(code=130)
+
+    start_time = time.time()
+    try:
+        x0, y0 = backend.read_position()
+    except Exception as e:
+        console.print(f"[bold red]Failed to read initial cursor position:[/bold red] {e}")
+        raise typer.Exit(code=1)
 
     # Dynamic Windows high-res timer
     if sys.platform.startswith("win"):
@@ -325,13 +356,6 @@ def record(
             backend.stop_listening()
         console.print(f"[bold red]Failed to open output file for writing:[/bold red] {e}")
         raise typer.Exit(code=1)
-
-    start_time = time.time()
-    try:
-        x0, y0 = backend.read_position()
-    except Exception:
-        # Fallback if position querying is unavailable initially
-        x0, y0 = 0, 0
 
     f.write(pack_header(codec, hz, scr_w, scr_h, start_time, x0, y0, capture))
     try:
@@ -409,6 +433,7 @@ def record(
     console.print(f"Recording initialized. Sample rate: {hz}Hz. Press Ctrl+C to abort.")
 
     recording_failed = False
+    backend_error: Exception | None = None
     try:
         # Construct live view if not quiet
         live: Live | None = None
@@ -435,8 +460,10 @@ def record(
             next_t += period
             try:
                 cur = backend.read_position()
-            except Exception:
-                cur = prev_pos
+            except Exception as e:
+                backend_error = e
+                recording_failed = True
+                break
 
             if capture & CAP_MOVE:
                 # last_event_frame can sit ahead of the tick counter when a
@@ -500,6 +527,11 @@ def record(
 
             if buf:
                 writer.write(bytes(buf))
+            if recording_failed:
+                # A deliberately incomplete trailing varint makes the recovered
+                # prefix self-identify as truncated even when compression closes
+                # cleanly (and for the raw codec, which has no frame footer).
+                writer.write(b"\x80")
             writer.close()
         except BaseException:
             recording_failed = True
@@ -524,6 +556,18 @@ def record(
                     except BaseException:
                         replacement.discard()
                         raise
+
+    if backend_error is not None:
+        outcome = (
+            "The existing destination was preserved."
+            if replacement is not None
+            else f"A recoverable prefix was finalized at {out_file}."
+        )
+        console.print(
+            f"[bold red]Recording stopped because cursor position read failed:[/bold red] "
+            f"{backend_error}. {outcome}"
+        )
+        raise typer.Exit(code=1)
 
     actual_size = os.path.getsize(out_file)
     console.print(
