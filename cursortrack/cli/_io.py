@@ -61,7 +61,9 @@ class AtomicOutput:
         """Durably replace the destination with the completed temporary file."""
         if not self._active:
             return
-        with open(self.path, "rb") as f:
+        # Windows' _commit() rejects a read-only descriptor with EBADF, so
+        # reopen read/write even though fsync itself does not modify contents.
+        with open(self.path, "rb+") as f:
             os.fsync(f.fileno())
         if os.path.exists(self.destination):
             mode = stat.S_IMODE(os.stat(self.destination).st_mode)
