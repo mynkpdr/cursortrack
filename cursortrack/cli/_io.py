@@ -92,4 +92,7 @@ class AtomicOutput:
         except OSError:
             pass
         finally:
-            os.close(fd)
+            try:
+                os.close(fd)
+            except OSError:
+                pass
