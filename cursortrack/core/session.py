@@ -15,6 +15,7 @@ from cursortrack.core.codec import (
     decompress_with_status,
 )
 from cursortrack.core.events import (
+    BUTTON_ID,
     BUTTON_NAME,
     DEFAULT_MAX_ABS_COORDINATE,
     DEFAULT_MAX_EVENTS,
@@ -59,6 +60,40 @@ def _validate_binary_header(header: dict[str, Any]) -> None:
         raise ValueError("Session screen dimensions cannot be negative.")
     if not math.isfinite(float(header["start"])):
         raise ValueError("Session start time must be finite.")
+
+
+def _finite_number(value: Any, label: str) -> float:
+    if isinstance(value, (bool, str, bytes)):
+        raise ValueError(f"{label} must be a finite number.")
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{label} must be a finite number.") from None
+    if not math.isfinite(result):
+        raise ValueError(f"{label} must be a finite number.")
+    return result
+
+
+def _integer(value: Any, label: str) -> int:
+    number = _finite_number(value, label)
+    if not number.is_integer():
+        raise ValueError(f"{label} must be an integer.")
+    return int(number)
+
+
+def _validate_interchange_metadata(
+    rate: int,
+    scr_w: int,
+    scr_h: int,
+    capture: int,
+    source: str,
+) -> None:
+    if not 1 <= rate <= 65535:
+        raise ValueError(f"{source}: rate must be 1..65535.")
+    if scr_w < 0 or scr_h < 0:
+        raise ValueError(f"{source}: screen dimensions cannot be negative.")
+    if not 0 <= capture <= 255:
+        raise ValueError(f"{source}: capture must fit in one byte.")
 
 
 class Session:
@@ -182,40 +217,85 @@ class Session:
         scr_w = 0
         scr_h = 0
         capture = 15
+        first_event = True
+        previous_time: float | None = None
 
         with open(path, encoding="utf-8") as f:
-            for i, raw_line in enumerate(f):
+            for line_number, raw_line in enumerate(f, start=1):
                 line = raw_line.strip()
                 if not line:
                     continue
-                data = json.loads(line)
-                t = float(data.get("t", 0.0))
-                if i == 0:
+                source = f"JSONL line {line_number}"
+                try:
+                    data = json.loads(line)
+                except json.JSONDecodeError as e:
+                    raise ValueError(f"{source}: invalid JSON ({e.msg}).") from None
+                if not isinstance(data, dict):
+                    raise ValueError(f"{source}: each event must be a JSON object.")
+                if len(events) >= DEFAULT_MAX_EVENTS:
+                    raise ValueError(
+                        f"{source}: event count exceeds the configured limit "
+                        f"of {DEFAULT_MAX_EVENTS}."
+                    )
+
+                t = _finite_number(data.get("t"), f"{source} timestamp")
+                x = _integer(data.get("x"), f"{source} x")
+                y = _integer(data.get("y"), f"{source} y")
+                if abs(x) > DEFAULT_MAX_ABS_COORDINATE or abs(y) > DEFAULT_MAX_ABS_COORDINATE:
+                    raise ValueError(f"{source}: coordinate exceeds the supported range.")
+                if previous_time is not None and t < previous_time:
+                    raise ValueError(f"{source}: timestamps must be nondecreasing.")
+
+                if first_event:
                     start_time = t
-                    rate = int(data.get("rate", rate))
-                    scr_w = int(data.get("scr_w", scr_w))
-                    scr_h = int(data.get("scr_h", scr_h))
-                    capture = int(data.get("capture", capture))
+                    rate = _integer(data.get("rate", rate), f"{source} rate")
+                    scr_w = _integer(data.get("scr_w", scr_w), f"{source} scr_w")
+                    scr_h = _integer(data.get("scr_h", scr_h), f"{source} scr_h")
+                    capture = _integer(data.get("capture", capture), f"{source} capture")
+                    _validate_interchange_metadata(rate, scr_w, scr_h, capture, source)
+                    first_event = False
+                else:
+                    expected_metadata = {
+                        "rate": rate,
+                        "scr_w": scr_w,
+                        "scr_h": scr_h,
+                        "capture": capture,
+                    }
+                    for key, expected in expected_metadata.items():
+                        if key in data and _integer(data[key], f"{source} {key}") != expected:
+                            raise ValueError(f"{source}: session metadata changed at {key}.")
 
                 frame = round((t - start_time) * rate)
-                x = int(data.get("x", 0))
-                y = int(data.get("y", 0))
+                if frame > DEFAULT_MAX_FRAME:
+                    raise ValueError(f"{source}: frame exceeds the supported range.")
                 etype = data.get("type", "move")
 
                 if etype == "move":
                     events.append(MoveEvent(frame=frame, x=x, y=y))
                 elif etype in ("down", "up"):
                     btn = data.get("button", "left")
+                    if not isinstance(btn, str) or btn not in BUTTON_ID:
+                        raise ValueError(f"{source}: unsupported button {btn!r}.")
                     events.append(
                         ButtonEvent(frame=frame, x=x, y=y, button=btn, pressed=(etype == "down"))
                     )
                 elif etype == "scroll":
-                    sdx = int(data.get("sdx", 0))
-                    sdy = int(data.get("sdy", 0))
+                    sdx = _integer(data.get("sdx", 0), f"{source} sdx")
+                    sdy = _integer(data.get("sdy", 0), f"{source} sdy")
+                    if (
+                        abs(sdx) > DEFAULT_MAX_ABS_COORDINATE
+                        or abs(sdy) > DEFAULT_MAX_ABS_COORDINATE
+                    ):
+                        raise ValueError(f"{source}: scroll delta exceeds the supported range.")
                     events.append(ScrollEvent(frame=frame, x=x, y=y, sdx=sdx, sdy=sdy))
                 elif etype == "tap":
-                    touch_id = int(data.get("touch_id", 0))
+                    touch_id = _integer(data.get("touch_id", 0), f"{source} touch_id")
+                    if touch_id < 0:
+                        raise ValueError(f"{source}: touch_id cannot be negative.")
                     events.append(TapEvent(frame=frame, x=x, y=y, touch_id=touch_id))
+                else:
+                    raise ValueError(f"{source}: unknown event type {etype!r}.")
+                previous_time = t
 
         header = {
             "version": 2,
@@ -240,42 +320,72 @@ class Session:
                 "Loading a NumPy track requires numpy. Install it using 'pip install numpy'."
             )
 
-        arr = np.load(path)
+        arr = np.load(path, allow_pickle=False)
         if arr.ndim != 2 or arr.shape[1] < 3:
             raise ValueError(
                 f"Expected a 2D numpy array with at least 3 columns; got shape {arr.shape}"
             )
+        if len(arr) > DEFAULT_MAX_EVENTS:
+            raise ValueError(
+                f"NumPy event count exceeds the configured limit of {DEFAULT_MAX_EVENTS}."
+            )
+        if not np.issubdtype(arr.dtype, np.number):
+            raise ValueError(f"NumPy session values must be numeric; got dtype {arr.dtype}.")
+        if not bool(np.isfinite(arr).all()):
+            raise ValueError("NumPy session values must all be finite.")
 
         events: list[InputEvent] = []
         has_rows = len(arr) > 0
         n_cols = arr.shape[1]
-        start_time = float(arr[0][0]) if has_rows else 0.0
+        if 7 <= n_cols < 10:
+            raise ValueError("NumPy session metadata is incomplete; expected columns 6-9.")
+        start_time = _finite_number(arr[0][0], "NumPy row 0 timestamp") if has_rows else 0.0
         # Columns 6-9 (rate, scr_w, scr_h, capture) are only present in files exported
         # by export_to_npy() after it started writing session metadata into every row;
         # older exports fall back to the previous hardcoded defaults.
-        rate = int(arr[0][6]) if has_rows and n_cols > 6 else 144
-        scr_w = int(arr[0][7]) if has_rows and n_cols > 7 else 0
-        scr_h = int(arr[0][8]) if has_rows and n_cols > 8 else 0
-        capture = int(arr[0][9]) if has_rows and n_cols > 9 else 15
+        rate = _integer(arr[0][6], "NumPy rate") if has_rows and n_cols >= 10 else 144
+        scr_w = _integer(arr[0][7], "NumPy scr_w") if has_rows and n_cols >= 10 else 0
+        scr_h = _integer(arr[0][8], "NumPy scr_h") if has_rows and n_cols >= 10 else 0
+        capture = _integer(arr[0][9], "NumPy capture") if has_rows and n_cols >= 10 else 15
+        _validate_interchange_metadata(rate, scr_w, scr_h, capture, "NumPy metadata")
+        if has_rows and n_cols >= 10 and not bool(np.all(arr[:, 6:10] == arr[0, 6:10])):
+            raise ValueError("NumPy session metadata must be constant on every row.")
 
-        for row in arr:
-            t = float(row[0])
+        previous_time: float | None = None
+        for row_number, row in enumerate(arr):
+            source = f"NumPy row {row_number}"
+            t = _finite_number(row[0], f"{source} timestamp")
+            if previous_time is not None and t < previous_time:
+                raise ValueError(f"{source}: timestamps must be nondecreasing.")
             frame = round((t - start_time) * rate)
-            x = int(row[1])
-            y = int(row[2])
-            tid = int(row[3]) if arr.shape[1] > 3 else 0
-            aux1 = float(row[4]) if arr.shape[1] > 4 else 0.0
-            aux2 = float(row[5]) if arr.shape[1] > 5 else 0.0
+            if frame > DEFAULT_MAX_FRAME:
+                raise ValueError(f"{source}: frame exceeds the supported range.")
+            x = _integer(row[1], f"{source} x")
+            y = _integer(row[2], f"{source} y")
+            if abs(x) > DEFAULT_MAX_ABS_COORDINATE or abs(y) > DEFAULT_MAX_ABS_COORDINATE:
+                raise ValueError(f"{source}: coordinate exceeds the supported range.")
+            tid = _integer(row[3], f"{source} event type") if n_cols > 3 else 0
+            aux1 = _integer(row[4], f"{source} aux1") if n_cols > 4 else 0
+            aux2 = _integer(row[5], f"{source} aux2") if n_cols > 5 else 0
 
             if tid == 0:  # MOVE
                 events.append(MoveEvent(frame=frame, x=x, y=y))
             elif tid in (1, 2):  # DOWN, UP
-                btn = BUTTON_NAME.get(int(aux1), "left")
+                btn = BUTTON_NAME.get(aux1)
+                if btn is None:
+                    raise ValueError(f"{source}: unknown button id {aux1}.")
                 events.append(ButtonEvent(frame=frame, x=x, y=y, button=btn, pressed=(tid == 1)))
             elif tid == 3:  # SCROLL
-                events.append(ScrollEvent(frame=frame, x=x, y=y, sdx=int(aux1), sdy=int(aux2)))
+                if abs(aux1) > DEFAULT_MAX_ABS_COORDINATE or abs(aux2) > DEFAULT_MAX_ABS_COORDINATE:
+                    raise ValueError(f"{source}: scroll delta exceeds the supported range.")
+                events.append(ScrollEvent(frame=frame, x=x, y=y, sdx=aux1, sdy=aux2))
             elif tid == 4:  # TAP
-                events.append(TapEvent(frame=frame, x=x, y=y, touch_id=int(aux1)))
+                if aux1 < 0:
+                    raise ValueError(f"{source}: touch id cannot be negative.")
+                events.append(TapEvent(frame=frame, x=x, y=y, touch_id=aux1))
+            else:
+                raise ValueError(f"{source}: unknown event type id {tid}.")
+            previous_time = t
 
         header = {
             "version": 2,

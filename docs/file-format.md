@@ -193,3 +193,11 @@ A single 2D `float64` array, one row per event, columns:
 `Session.load_npy()` reads columns 6-9 from row 0 when present. Files with 6 or fewer columns (exported before this metadata was added) fall back to the same legacy defaults as JSONL (`rate=144, scr_w=0, scr_h=0, capture=15`). An empty session still exports as a `(0, 10)` array rather than a 1D `(0,)` array, so it reloads cleanly instead of failing the "must be 2D" check.
 
 Both formats are read-compatible forever under these rules: adding new trailing columns/keys is safe (old readers ignore them via `.get()`/column-count checks); removing or reordering existing ones is not.
+
+Interchange loaders validate that timestamps and numeric fields are finite,
+timestamps are nondecreasing, event/button IDs are known, coordinates are
+integral and bounded, and repeated metadata remains constant. Invalid rows
+raise `ValueError` with their JSONL line or NumPy row number instead of being
+silently coerced or dropped. CSV is export-only; it uses standard CSV quoting
+and prefixes formula-like string cells with an apostrophe so opening an export
+in spreadsheet software cannot execute event text as a formula.
