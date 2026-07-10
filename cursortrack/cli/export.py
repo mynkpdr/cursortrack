@@ -16,6 +16,16 @@ app = typer.Typer(help="Convert cursortrack files into CSV, JSONL, NumPy, or Par
 console = Console()
 
 
+def _resolve_output_path(file: str, out: Optional[str], fmt: str) -> str:
+    """Resolve the exact path exporters will write before safety checks run."""
+    if out is None:
+        base, _ = os.path.splitext(file)
+        return f"{base}.{fmt}"
+    if fmt == "npy" and not out.lower().endswith(".npy"):
+        return f"{out}.npy"
+    return out
+
+
 @app.command()
 def export(
     file: str = typer.Argument(
@@ -54,12 +64,7 @@ def export(
         )
         raise typer.Exit(code=1)
 
-    # Determine destination file path
-    if out is None:
-        base, _ = os.path.splitext(file)
-        out_path = f"{base}.{fmt}"
-    else:
-        out_path = out
+    out_path = _resolve_output_path(file, out, fmt)
 
     if os.path.exists(out_path) and os.path.samefile(file, out_path):
         console.print(

@@ -69,8 +69,9 @@ def export_to_npy(session: Session, out_path: str) -> int:
         if rows
         else np.empty((0, len(NPY_COLUMNS)), dtype=np.float64)
     )
-    if not out_path.endswith(".npy"):
-        out_path += ".npy"
-
-    np.save(out_path, arr)
+    # Passing a string path makes numpy append ".npy" implicitly. Use a file
+    # handle so this library API writes exactly the destination its caller
+    # already validated.
+    with open(out_path, "wb") as f:
+        np.save(f, arr)
     return len(arr)
