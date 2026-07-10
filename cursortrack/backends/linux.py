@@ -10,7 +10,7 @@ from typing import Any, Callable
 
 from cursortrack.backends._pynput_listener import verify_listener_running
 from cursortrack.backends.base import InputBackend
-from cursortrack.core.events import CAP_CLICK, CAP_SCROLL, CAP_TOUCH
+from cursortrack.core.events import CAP_CLICK, CAP_SCROLL
 
 # X11 core protocol button numbers
 BUTTON_LEFT = 1
@@ -396,6 +396,11 @@ class LinuxBackend(InputBackend):
         on_event: Callable[[str, tuple[Any, ...], float], None],
         capture_mask: int,
     ) -> None:
+        want_click = bool(capture_mask & CAP_CLICK)
+        want_scroll = bool(capture_mask & CAP_SCROLL)
+        if not (want_click or want_scroll):
+            return
+
         # Dynamic import of pynput listener (uses X11 hooks on Linux)
         try:
             from pynput import mouse
@@ -406,12 +411,6 @@ class LinuxBackend(InputBackend):
             )
 
         import time
-
-        want_click = bool(capture_mask & (CAP_CLICK | CAP_TOUCH))
-        want_scroll = bool(capture_mask & CAP_SCROLL)
-
-        if not (want_click or want_scroll):
-            return
 
         def _on_click(x: float, y: float, button: Any, pressed: bool) -> None:
             if want_click:

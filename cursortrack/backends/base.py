@@ -80,7 +80,9 @@ class InputBackend(abc.ABC):
 
         Args:
             on_event: Callback accepting (event_type, payload_tuple, timestamp).
-            capture_mask: Bitmask of CAP_MOVE, CAP_CLICK, CAP_SCROLL, CAP_TOUCH to record.
+            capture_mask: Requested event bitmask. Backends must ignore unsupported
+                capabilities; current implementations support CAP_CLICK and CAP_SCROLL
+                listeners, while movement is sampled by the recorder.
         """
         pass
 

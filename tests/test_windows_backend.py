@@ -144,6 +144,16 @@ def _bare_backend() -> WindowsBackend:
     return backend
 
 
+def test_touch_only_mask_does_not_install_a_mouse_listener() -> None:
+    """Reserved touch events must not be synthesized from ordinary mouse clicks."""
+    from cursortrack.core.events import CAP_TOUCH
+
+    backend = _bare_backend()
+    backend.start_listening(lambda *_: None, CAP_TOUCH)
+
+    assert backend._listener is None
+
+
 @requires_windows
 def test_listener_is_running_after_start_listening() -> None:
     """A successfully started listener must report `running` and stop cleanly.

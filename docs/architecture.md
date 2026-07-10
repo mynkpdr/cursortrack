@@ -56,21 +56,31 @@ To prevent simulated replays from capturing display focus and locking out human 
 
 ---
 
-## 4. Touchpad Gesture Capture Limitations
+## 4. Touch and Gesture Boundary
 
-`WindowsBackend.start_listening()` captures clicks and scroll through a single `pynput.mouse.Listener`, which under the hood is a low-level Win32 mouse hook (`WH_MOUSE_LL`). That hook only sees the same message types any Windows app can see: `WM_LBUTTONDOWN/UP` (and other buttons), `WM_MOUSEWHEEL`, `WM_MOUSEHWHEEL`. This has two real consequences for touchpad input, one unfixable and one that's a known, deliberately-deferred gap:
+Current backends expose cursor movement, mouse buttons, and wheel-style scroll
+events only. They do not emit raw touch contacts, pressure, finger IDs, or
+multi-finger gesture phases. Consequently:
 
-**Multi-finger gestures (pinch, rotate, 3/4-finger swipes) — architecturally unfixable.** Windows never turns these into mouse messages at all; it consumes them internally for shell-level gestures (Task View, virtual desktop switching). The only API surface that exposes multi-finger gesture data is `Windows.UI.Input.GestureRecognizer` (WinRT), and it's scoped to a window that currently holds pointer focus — it cannot be subscribed to system-wide from a background process. There is no lower-level fallback for this one; it is a genuine ceiling of what a background recorder can do on Windows.
+- `cursortrack record --capture touch` is rejected rather than misrepresenting
+  ordinary mouse clicks as `TapEvent` records.
+- `--capture all` means all currently supported mouse events: move, click, and
+  scroll.
+- The v2 `CAP_TOUCH` bit and `TapEvent` tag remain decodable for file-format
+  compatibility and possible future native backends. Playback of an existing
+  tap retains its legacy left-click interpretation.
 
-**Two-finger scroll — sometimes invisible, but not for the same reason.** Two-finger scroll *is* just two touch contacts moving together, and in principle it's a much simpler gesture than the ones above. Whether `CAP_SCROLL` sees it depends entirely on how a given touchpad's Precision Touchpad (PTP) driver chooses to deliver it:
-- Some drivers synthesize a classic `WM_MOUSEWHEEL`/`WM_MOUSEHWHEEL` message for compatibility — `pynput`'s hook (and thus CursorTrack) sees this fine.
-- Others deliver it through a modern pointer/gesture channel (`WM_POINTER`-based smooth/inertial scrolling or DirectManipulation) that bypasses `WM_MOUSEWHEEL` entirely. On these drivers, **no** low-level hook can see it as a scroll event — this was confirmed by direct testing: both `pynput` and a raw `ctypes`-based `WH_MOUSE_LL` hook (bypassing `pynput` entirely) captured zero wheel messages during two-finger scrolling, even though the OS was visibly scrolling window content correctly and the touchpad's "two-finger scrolling" setting was enabled. Physical/USB mouse wheel scrolling is unaffected either way, since a real scroll wheel always generates the classic message.
+Two-finger touchpad scrolling is captured only when the OS or device driver
+synthesizes a standard wheel event. Windows Precision Touchpad drivers may use
+`WM_POINTER`/DirectManipulation instead of `WM_MOUSEWHEEL`; macOS may report
+smooth or inertial deltas that cannot be represented faithfully as integer
+wheel steps; native Wayland deliberately restricts global observation.
+Physical mouse wheels remain within the supported path.
 
-**The real fix, and why it's deferred.** Two-finger scroll's raw signal — two touch contacts — is still available via the Raw Input API (`RegisterRawInputDevices` with the Digitizer/Touch-Pad HID usage), which bypasses Windows' gesture-interpretation layer and can run from a background message-only window (no visible/focused UI required, unlike `GestureRecognizer`). Building this requires: a hidden message-only window + Win32 message pump on a background thread, HID report parsing (`hid.dll`'s `HidP_*` functions) to extract per-contact position/count, and a hand-rolled "2 contacts moving together vertically" gesture recognizer on top. This was deliberately not built for v0.1 because:
-- Precision Touchpad HID report layouts are only loosely standardized across vendors (Synaptics/Elan/etc. have shipped nonstandard variants), so behavior validated on one laptop isn't guaranteed to hold on another.
-- It cannot be exercised by CI at all — GitHub Actions Windows runners have no touchpad hardware, so this subsystem would have zero automated regression coverage, unlike everything else in this codebase.
-
-Contributions implementing raw digitizer capture are welcome; see [CONTRIBUTING.md](../CONTRIBUTING.md).
+Real touch capture would require separate platform implementations and a richer
+event model: Windows Raw Input/HID parsing, macOS digitizer/event-tap semantics,
+and compositor-approved Wayland APIs. It must not be approximated from mouse
+click callbacks.
 
 ---
 

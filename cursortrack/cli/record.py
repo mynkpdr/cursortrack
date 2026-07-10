@@ -29,15 +29,13 @@ from cursortrack.core.codec import (
 )
 from cursortrack.core.events import (
     BUTTON_ID,
-    CAP_ALL,
     CAP_CLICK,
+    CAP_MOUSE,
     CAP_MOVE,
     CAP_SCROLL,
-    CAP_TOUCH,
     encode_click,
     encode_move,
     encode_scroll,
-    encode_tap,
 )
 from cursortrack.core.format import pack_header
 
@@ -81,21 +79,25 @@ def parse_capture_arg(s: str) -> int:
     """Parse comma-separated capture target flags into bitmask value."""
     val = s.strip().lower()
     if val == "all":
-        return CAP_ALL
+        return CAP_MOUSE
     mask = 0
     name_to_bit = {
         "move": CAP_MOVE,
         "click": CAP_CLICK,
         "scroll": CAP_SCROLL,
-        "touch": CAP_TOUCH,
     }
     for p in val.split(","):
         part = p.strip()
         if not part:
             continue
+        if part == "touch":
+            raise typer.BadParameter(
+                "Touch capture is not supported by the current backends. "
+                "Use move, click, scroll, or all."
+            )
         if part not in name_to_bit:
             raise typer.BadParameter(
-                f"Unknown capture flag '{part}'. Valid options: move, click, scroll, touch, all."
+                f"Unknown capture flag '{part}'. Valid options: move, click, scroll, all."
             )
         mask |= name_to_bit[part]
 
@@ -128,7 +130,6 @@ def make_status_panel(
     frames: int,
     clicks: int,
     scrolls: int,
-    taps: int,
     size_str: str,
     filepath: str,
     backend: str,
@@ -153,9 +154,7 @@ def make_status_panel(
     text.append("Button Clicks: ", style="bold white")
     text.append(f"{clicks}\n", style="cyan")
     text.append("Scrolls:       ", style="bold white")
-    text.append(f"{scrolls}\n", style="cyan")
-    text.append("Taps:          ", style="bold white")
-    text.append(f"{taps}\n\n", style="cyan")
+    text.append(f"{scrolls}\n\n", style="cyan")
 
     text.append("On-disk Size:  ", style="bold white")
     text.append(f"{size_str}\n\n", style="magenta")
@@ -181,7 +180,7 @@ def record(
         "move",
         "--capture",
         "-c",
-        help="What to record: comma-separated list of move, click, scroll, touch, or all.",
+        help="What to record: comma-separated list of move, click, scroll, or all.",
     ),
     hz: int = typer.Option(
         144, "--hz", help="Move sampling frequency in Hertz (samples per second)."
@@ -224,7 +223,7 @@ def record(
         help="Overwrite the output file if it already exists.",
     ),
 ) -> None:
-    """Record physical mouse and touch gestures into a compact, crash-safe binary format."""
+    """Record physical mouse input into a compact, crash-safe binary format."""
     global _STOP
     _STOP = False
 
@@ -333,8 +332,8 @@ def record(
     def on_event_callback(kind: str, payload: tuple[Any, ...], t_perf: float) -> None:
         q.put((kind, payload, t_perf))
 
-    # Start listener for clicks, scrolls, or touchpad taps
-    needs_listener = bool(capture & (CAP_CLICK | CAP_SCROLL | CAP_TOUCH))
+    # Start listener only for event types the backends actually expose.
+    needs_listener = bool(capture & (CAP_CLICK | CAP_SCROLL))
     if needs_listener:
         try:
             backend.start_listening(on_event_callback, capture)
@@ -372,7 +371,7 @@ def record(
     frame = 0
     last_event_frame = 0
     prev_pos = (x0, y0)
-    event_counts = {"move": 1, "down": 0, "up": 0, "scroll": 0, "tap": 0}
+    event_counts = {"move": 1, "down": 0, "up": 0, "scroll": 0}
     unknown_buttons_seen: set[str] = set()
 
     perf = time.perf_counter
@@ -415,10 +414,6 @@ def record(
                     # btn_name is guaranteed known here by the guard above.
                     encode_click(buf, dframes, pressed, BUTTON_ID[btn_name], dx, dy)
                     event_counts["down" if pressed else "up"] += 1
-                elif capture & CAP_TOUCH:
-                    # Map to tap
-                    encode_tap(buf, dframes, 0, dx, dy)
-                    event_counts["tap"] += 1
 
             elif kind == "scroll":
                 x, y, sdx, sdy = payload
@@ -441,7 +436,6 @@ def record(
             live = Live(
                 make_status_panel(
                     "00:00:00",
-                    0,
                     0,
                     0,
                     0,
@@ -500,7 +494,6 @@ def record(
                             event_counts["move"],
                             event_counts["down"],
                             event_counts["scroll"],
-                            event_counts["tap"],
                             size_str,
                             out_file,
                             backend_name,
