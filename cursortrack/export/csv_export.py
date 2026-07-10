@@ -2,10 +2,18 @@
 
 from __future__ import annotations
 
+import csv
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from cursortrack.core.session import Session
+
+
+def _spreadsheet_safe(value: object) -> object:
+    """Neutralize string cells that spreadsheet programs may execute as formulas."""
+    if isinstance(value, str) and value.startswith(("=", "+", "-", "@", "\t", "\r")):
+        return f"'{value}"
+    return value
 
 
 def export_to_csv(session: Session, out_path: str) -> int:
@@ -15,7 +23,8 @@ def export_to_csv(session: Session, out_path: str) -> int:
         The total number of rows written.
     """
     with open(out_path, "w", newline="", encoding="utf-8") as o:
-        o.write("t,type,x,y,button,sdx,sdy,touch_id\n")
+        writer = csv.writer(o)
+        writer.writerow(["t", "type", "x", "y", "button", "sdx", "sdy", "touch_id"])
         count = 0
         for ev in session.events:
             t = session.start_time + ev.frame / session.rate
@@ -26,18 +35,17 @@ def export_to_csv(session: Session, out_path: str) -> int:
             sdy = d.get("sdy", "")
             touch_id = d.get("touch_id", "")
 
-            o.write(
-                "%.6f,%s,%d,%d,%s,%s,%s,%s\n"
-                % (
-                    t,
-                    etype,
+            writer.writerow(
+                [
+                    f"{t:.6f}",
+                    _spreadsheet_safe(etype),
                     ev.x,
                     ev.y,
-                    btn,
+                    _spreadsheet_safe(btn),
                     sdx,
                     sdy,
                     touch_id,
-                )
+                ]
             )
             count += 1
     return count

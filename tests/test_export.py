@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import json
 import os
 
@@ -9,7 +10,7 @@ import pytest
 
 from cursortrack.core.events import ButtonEvent, MoveEvent, ScrollEvent, TapEvent
 from cursortrack.core.session import Session
-from cursortrack.export import export_to_jsonl, export_to_npy, export_to_parquet
+from cursortrack.export import export_to_csv, export_to_jsonl, export_to_npy, export_to_parquet
 
 
 def _sample_session() -> Session:
@@ -184,6 +185,119 @@ def test_jsonl_legacy_file_without_metadata_falls_back_to_defaults(tmp_path: obj
     assert reloaded.screen_width == 0
     assert reloaded.screen_height == 0
     assert reloaded.capture_mask == 15
+
+
+def test_jsonl_metadata_uses_first_nonblank_line(tmp_path: object) -> None:
+    out_path = str(tmp_path) + "/leading-blank.jsonl"
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write("\n")
+        f.write(
+            json.dumps(
+                {
+                    "t": 1000.0,
+                    "type": "move",
+                    "x": 500,
+                    "y": 500,
+                    "rate": 60,
+                    "scr_w": 2560,
+                    "scr_h": 1440,
+                    "capture": 1,
+                }
+            )
+            + "\n"
+        )
+        f.write(json.dumps({"t": 1000.5, "type": "move", "x": 505, "y": 505}) + "\n")
+
+    reloaded = Session.load_jsonl(out_path)
+
+    assert reloaded.rate == 60
+    assert reloaded.screen_width == 2560
+    assert reloaded.screen_height == 1440
+    assert [event.frame for event in reloaded.events] == [0, 30]
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        {"t": 1000.0, "type": "unknown", "x": 1, "y": 2},
+        {"t": 1000.0, "type": "down", "x": 1, "y": 2, "button": "button99"},
+        {"t": float("nan"), "type": "move", "x": 1, "y": 2},
+        {"t": 1000.0, "type": "move", "x": 1.5, "y": 2},
+    ],
+)
+def test_jsonl_rejects_invalid_event_rows(tmp_path: object, row: dict[str, object]) -> None:
+    out_path = str(tmp_path) + "/invalid.jsonl"
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write(json.dumps(row) + "\n")
+
+    with pytest.raises(ValueError, match="line 1"):
+        Session.load_jsonl(out_path)
+
+
+def test_jsonl_reports_malformed_json_line(tmp_path: object) -> None:
+    out_path = str(tmp_path) + "/malformed.jsonl"
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write('{"t": 1000.0, "type": "move"\n')
+
+    with pytest.raises(ValueError, match="line 1"):
+        Session.load_jsonl(out_path)
+
+
+def test_npy_rejects_nonfinite_unknown_and_inconsistent_rows(tmp_path: object) -> None:
+    np = pytest.importorskip("numpy")
+
+    nonfinite = np.array([[float("nan"), 1, 2]], dtype=np.float64)
+    nonfinite_path = str(tmp_path) + "/nonfinite.npy"
+    np.save(nonfinite_path, nonfinite)
+    with pytest.raises(ValueError, match="finite"):
+        Session.load_npy(nonfinite_path)
+
+    unknown_type = np.array([[1000, 1, 2, 99, 0, 0]], dtype=np.float64)
+    unknown_type_path = str(tmp_path) + "/unknown-type.npy"
+    np.save(unknown_type_path, unknown_type)
+    with pytest.raises(ValueError, match="event type"):
+        Session.load_npy(unknown_type_path)
+
+    unknown_button = np.array([[1000, 1, 2, 1, 99, 0]], dtype=np.float64)
+    unknown_button_path = str(tmp_path) + "/unknown-button.npy"
+    np.save(unknown_button_path, unknown_button)
+    with pytest.raises(ValueError, match="button"):
+        Session.load_npy(unknown_button_path)
+
+    inconsistent = np.array(
+        [
+            [1000, 1, 2, 0, 0, 0, 60, 1920, 1080, 1],
+            [1001, 2, 3, 0, 0, 0, 144, 1920, 1080, 1],
+        ],
+        dtype=np.float64,
+    )
+    inconsistent_path = str(tmp_path) + "/inconsistent.npy"
+    np.save(inconsistent_path, inconsistent)
+    with pytest.raises(ValueError, match="metadata"):
+        Session.load_npy(inconsistent_path)
+
+
+def test_csv_export_escapes_rows_and_neutralizes_formula_strings(tmp_path: object) -> None:
+    session = _sample_session()
+    dangerous_button = '=HYPERLINK("https://example.invalid"),\nnext'
+    session.events = [
+        ButtonEvent(
+            frame=0,
+            x=10,
+            y=20,
+            button=dangerous_button,
+            pressed=True,
+        )
+    ]
+    out_path = str(tmp_path) + "/safe.csv"
+
+    export_to_csv(session, out_path)
+
+    with open(out_path, newline="", encoding="utf-8") as f:
+        rows = list(csv.reader(f))
+    assert len(rows) == 2
+    assert len(rows[1]) == 8
+    assert rows[1][4] == f"'{dangerous_button}"
 
 
 def test_parquet_export(tmp_path: object) -> None:
