@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-11
+
+A playback-portability and Windows Precision Touchpad feature release. Existing
+v1/v2 session layouts remain unchanged; portable v3 session encoding tracked in
+#60 is intentionally deferred.
+
 ### Added
 - **Playback compatibility preview** (#50): `play --dry-run` reports source/target
   layout and capability mismatches without injecting input.
