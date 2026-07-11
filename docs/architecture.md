@@ -48,6 +48,14 @@ The programmatic core library.
 ### `cursortrack/backends/`
 Encapsulates OS-specific interaction. Subclasses of `InputBackend` implement coordinates retrieval, mouse warping, and hardware click/scroll hooks. Calling code handles these actions through the abstraction, making platform support entirely additive.
 
+Windows Precision Touchpad support is divided by responsibility:
+- `_touchpad_scroll.py` contains platform-neutral frame assembly, translation,
+  bounded wheel-step reconstruction, and duplicate arbitration.
+- `_windows_hid.py` contains Win32 ABI declarations, Raw Input transport, and
+  HID descriptor/report parsing.
+- `_windows_touchpad.py` owns device state, the hidden-window message loop,
+  registration lifecycle, probing, and configuration.
+
 ### `cursortrack/export/`
 Translates parsed `Session` events into analytical standard formats. It handles CSV, JSON Lines, NumPy binary files, and optionally Parquet tables.
 
@@ -75,17 +83,46 @@ multi-finger gesture phases. Consequently:
   compatibility and possible future native backends. Playback of an existing
   tap retains its legacy left-click interpretation.
 
-Two-finger touchpad scrolling is captured only when the OS or device driver
-synthesizes a standard wheel event. Windows Precision Touchpad drivers may use
-`WM_POINTER`/DirectManipulation instead of `WM_MOUSEWHEEL`; macOS may report
-smooth or inertial deltas that cannot be represented faithfully as integer
-wheel steps; native Wayland deliberately restricts global observation.
-Physical mouse wheels remain within the supported path.
+Windows has an additional experimental path for devices exposing Microsoft's
+standard Precision Touchpad HID collection (usage page `0x0D`, usage `0x05`).
+A hidden message-only window registers for `WM_INPUT` with `RIDEV_INPUTSINK`,
+uses Contact Count and Scan Time to assemble parallel or hybrid packets, and
+parses contact IDs, tip/confidence switches, and normalized X/Y values through
+`HidP_*`. Confident parallel two-finger translation is then reconstructed as
+discrete wheel steps. A short one-for-one arbitration window removes matching
+duplicate steps when Windows also synthesizes `WM_MOUSEWHEEL`. The ordinary
+`pynput` hook stays active for physical wheels and non-PTP devices. Arbitration
+is necessarily best-effort: an unrelated same-direction wheel step arriving in
+the same short window is not always distinguishable from a synthesized
+duplicate.
 
-Real touch capture would require separate platform implementations and a richer
-event model: Windows Raw Input/HID parsing, macOS digitizer/event-tap semantics,
-and compositor-approved Wayland APIs. It must not be approximated from mouse
-click callbacks.
+Raw Input allows only one target window per device class in a process.
+Therefore the standalone `record` CLI opts in only for scroll capture and
+refuses to replace an existing in-process owner. Programmatic backend users
+remain hook-only unless they call `request_enhanced_scroll_capture()` or set
+`CURSORTRACK_WINDOWS_TOUCHPAD=1`. Registration, hidden-window creation, hook
+startup, and teardown are treated as one owned lifecycle. A runtime parser or
+listener failure is surfaced through `InputBackend.check_listener_health()` so
+the recorder finalizes a truncated prefix instead of silently losing events.
+
+Each device handle has independent frame and gesture state. Windows may omit
+the device handle for Precision Touchpad packets; this is supported when one
+compatible touchpad is active and rejected with a diagnostic when multiple
+devices make attribution ambiguous.
+
+This reconstruction cannot retain native pixel-level deltas, acceleration, or
+inertia because the v2 event model stores integer wheel steps. It deliberately
+rejects opposing two-finger motion (pinch/spread) and does not attempt
+three/four-finger gestures. Vendor-specific legacy touchpads may not expose the
+standard HID collection and therefore remain on the ordinary hook path. macOS
+may report smooth or inertial deltas that cannot be represented faithfully as
+integer wheel steps; native Wayland deliberately restricts global observation.
+
+Persisting real touch contacts would still require a richer event model plus
+separate platform implementations: the Windows Raw Input path currently uses
+contacts only as an internal scroll signal, while macOS needs digitizer/event
+tap semantics and Wayland needs compositor-approved APIs. Touch must not be
+approximated from mouse click callbacks.
 
 ---
 

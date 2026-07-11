@@ -13,6 +13,7 @@ v0.2 provides a first-class, dependency-free experience on **Windows** (native W
 ## Features
 
 - **🟢 High-Fidelity Recording**: Sample cursor movements (up to 240+ Hz), mouse buttons (press/release), and discrete vertical/horizontal scroll events.
+- **🖐️ Windows Precision Touchpad Experiment**: Reconstruct two-finger scrolling from standardized Raw Input/HID reports when modern apps such as Chrome and VS Code bypass legacy wheel hooks.
 - **⚡ Dependency-Free Playback**: Emulate mouse coordinates and clicks natively on Windows (Win32) and Linux (X11/XTest) via ctypes — zero packages required to replay or capture position.
 - **🔒 Playback Fail-Safe**: Instantly abort an active replay by moving your mouse manually into **any corner** of the screen or pressing the **Esc** key globally.
 - **📦 Crash-Safe Stream**: Buffers flush and `fsync` periodically to disk so that recordings are fully readable even if the script is abruptly killed.
@@ -103,7 +104,29 @@ cursortrack export session.ctrk --to npy
 ### 5. Check Environment Health
 ```bash
 cursortrack doctor
+
+# Windows only: verify raw two-finger scroll capture over Chrome or VS Code
+cursortrack doctor --touchpad-test 15
 ```
+
+On Windows, a recording that includes scroll capture uses Raw Input alongside
+the normal mouse hook when a descriptor-compatible Microsoft Precision
+Touchpad is present. Programmatic backend users must explicitly call
+`request_enhanced_scroll_capture()` (or set
+`CURSORTRACK_WINDOWS_TOUCHPAD=1`) because Windows permits only one Raw Input
+target per device class in a process. CursorTrack refuses to replace another
+in-process owner and falls back to the ordinary hook with a warning.
+
+Set `CURSORTRACK_WINDOWS_TOUCHPAD=0` to force the original hook-only path.
+Invalid environment values are rejected. If reconstructed scrolling is too
+slow or too fast, set `CURSORTRACK_TOUCHPAD_STEP_FRACTION` between `0.002` and
+`0.1` (default `0.012`; lower values produce more wheel steps). Runtime loss of
+an active raw listener stops the recording and marks its recoverable prefix as
+truncated rather than silently producing a session with missing scrolls.
+`doctor --touchpad-test` exits nonzero when the descriptor is unsupported, the
+listener fails, or no reconstructed event is observed. Invoking that diagnostic
+explicitly tests Raw Input even when normal recording is disabled through
+`CURSORTRACK_WINDOWS_TOUCHPAD=0`.
 
 ---
 
@@ -135,7 +158,7 @@ print(df.head())
 ## Known Limitations (v0.2.x)
 
 - **Native Wayland windows are out of reach on Linux.** The Linux backend connects through X11, which also covers XWayland windows on Wayland desktops. However, events delivered to *native* Wayland clients cannot be globally captured, and emulation targeting them is blocked by the compositor's sandboxing — this applies to every unprivileged tool, not just CursorTrack. Pure X11 sessions have no such restriction. See [docs/architecture.md](docs/architecture.md#5-linux-x11wayland-notes) for details.
-- **Raw touch contacts and multi-finger touchpad gestures are not captured.** The v2 format retains its reserved `TapEvent`/touch bit for compatibility, but current backends never synthesize touch events from mouse clicks and the CLI rejects `--capture touch`. Two-finger scrolling is recorded only when the OS/driver exposes it as a standard wheel event; physical mouse wheels are unaffected. See [docs/architecture.md](docs/architecture.md#4-touch-and-gesture-boundary).
+- **Raw touch contacts and general multi-finger gestures are not stored.** The v2 format retains its reserved `TapEvent`/touch bit for compatibility, but current backends never synthesize touch events from mouse clicks and the CLI rejects `--capture touch`. On Windows, standardized Precision Touchpads have an experimental Raw Input path that reconstructs two-finger translation as discrete wheel steps. Vendor-specific/legacy touchpads, pinch zoom, three/four-finger gestures, and native inertial detail remain unsupported. Physical wheels continue through the ordinary hook, although a coincident same-direction step can be indistinguishable from a synthesized duplicate inside the short arbitration window. See [docs/architecture.md](docs/architecture.md#4-touch-and-gesture-boundary).
 
 ---
 

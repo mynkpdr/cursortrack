@@ -24,11 +24,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Playback-only `--invert-scroll` and `--scroll-scale` controls correct scroll
   direction and intensity without modifying recordings. Fractional scaling
   accumulates remainder so low scales preserve small scroll movements (#63).
+- Experimental Windows Precision Touchpad Raw Input capture (#66) reconstructs
+  two-finger translation when Chrome, VS Code, or another modern application
+  bypasses the legacy global wheel hook. Descriptor-aware
+  `doctor --touchpad-test SECONDS` diagnostics fail clearly when capture is
+  unavailable or no reconstructed event is observed.
 
 ### Changed
 - `play` now negotiates compatibility before injection. Same-machine v1/v2 replay
   with matching screen size still works under absolute mapping, with warnings about
   insufficient portable metadata.
+- Windows touchpad capture separates pure reconstruction, Win32/HID transport,
+  and listener lifecycle code. Programmatic backends use the typed
+  `request_enhanced_scroll_capture()`, status, and
+  `check_listener_health()` hooks.
+- Windows CLI scroll recording automatically requests the compatible native
+  source; library callers remain opt-in. Reconstructed input uses existing v2
+  integer scroll events, so this introduces no session-format change.
 
 ### Fixed
 - Compatibility preview now hard-fails unknown buttons and missing button-injection
@@ -36,6 +48,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   target bounds before injection.
 - Windows labels coordinates as physical pixels only when per-monitor-v2 DPI
   awareness was successfully established; otherwise it reports a backend unit.
+- Precision Touchpad startup and teardown now preserve process-wide Raw Input
+  ownership, roll back partial startup, keep independent per-device state, and
+  report listener/parser loss instead of silently completing with missing scrolls.
+- The hook-only Windows fallback preserves `pynput` event coordinates, while
+  duplicate arbitration handles out-of-order callbacks and failed delivery
+  without retaining phantom scroll debt.
 
 ## [0.2.2] - 2026-07-10
 
