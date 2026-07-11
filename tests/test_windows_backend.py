@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import ctypes
 import sys
+import time
 from typing import Any
 
 import pytest
@@ -32,6 +33,7 @@ from cursortrack.backends.windows import (
     _enable_dpi_awareness,
 )
 from cursortrack.core.layout import CoordinateUnit
+from tests.conftest import MockBackend
 
 IS_WINDOWS = sys.platform.startswith("win")
 
@@ -319,9 +321,11 @@ def test_start_listening_raises_when_hook_never_comes_up(monkeypatch: pytest.Mon
     monkeypatch.setattr(mouse, "Listener", DeadListener)
 
     backend = _bare_backend()
+    backend._listener_error = "previous teardown failed"
     with pytest.raises(RuntimeError, match="hook failed to start"):
         backend.start_listening(lambda *_: None, CAP_CLICK)
     assert backend._listener is None
+    assert backend._listener_error == "previous teardown failed"
 
 
 def test_stop_listening_joins_a_live_listener(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -344,6 +348,7 @@ def test_stop_listening_joins_a_live_listener(monkeypatch: pytest.MonkeyPatch) -
 
         def stop(self) -> None:
             calls.append("stop")
+            self.running = False
 
         def join(self, timeout: float | None = None) -> None:
             calls.append(f"join:{timeout}")
@@ -356,3 +361,322 @@ def test_stop_listening_joins_a_live_listener(monkeypatch: pytest.MonkeyPatch) -
 
     assert calls == ["start", "stop", "join:2.0"]
     assert backend._listener is None
+
+
+def test_base_backend_reports_an_unsupported_enhanced_scroll_request() -> None:
+    backend = MockBackend()
+
+    backend.request_enhanced_scroll_capture()
+    status = backend.get_enhanced_scroll_capture_status()
+
+    assert status.requested
+    assert not status.active
+    assert status.degraded_reason == "This backend does not provide enhanced scroll capture."
+
+
+def test_pynput_cleanup_failure_is_retained_for_health_check() -> None:
+    class BrokenListener:
+        def stop(self) -> None:
+            raise RuntimeError("stop broke")
+
+        def join(self, timeout: float | None = None) -> None:
+            del timeout
+            raise RuntimeError("join broke")
+
+    backend = _bare_backend()
+    backend._listener = BrokenListener()
+    backend._touchpad_listener = None
+    backend._listener_error = None
+
+    backend.stop_listening()
+
+    with pytest.raises(RuntimeError, match=r"stop broke.*join broke"):
+        backend.check_listener_health()
+
+
+def test_pynput_runtime_failure_remains_visible_after_stop() -> None:
+    class DeadListener:
+        running = False
+
+        def stop(self) -> None:
+            pass
+
+        def join(self, timeout: float | None = None) -> None:
+            del timeout
+
+    backend = _bare_backend()
+    backend._listener = DeadListener()
+    backend._touchpad_listener = None
+    backend._listener_error = None
+
+    with pytest.raises(RuntimeError, match="stopped unexpectedly"):
+        backend.check_listener_health()
+    backend.stop_listening()
+    with pytest.raises(RuntimeError, match="stopped unexpectedly"):
+        backend.check_listener_health()
+
+
+def test_pynput_join_timeout_is_reported() -> None:
+    class StuckListener:
+        running = True
+
+        def stop(self) -> None:
+            self.running = False
+
+        def join(self, timeout: float | None = None) -> None:
+            del timeout
+
+        def is_alive(self) -> bool:
+            return True
+
+    backend = _bare_backend()
+    backend._listener = StuckListener()
+    backend._touchpad_listener = None
+    backend._listener_error = None
+
+    backend.stop_listening()
+
+    with pytest.raises(RuntimeError, match="did not stop"):
+        backend.check_listener_health()
+    assert backend._listener is not None
+
+
+def test_precision_touchpad_scroll_path_is_deduplicated_and_stopped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Raw touchpad and synthesized hook events must produce one recorded step."""
+    pytest.importorskip("pynput", exc_type=ImportError)
+    from pynput import mouse
+
+    import cursortrack.backends.windows as windows_backend
+    from cursortrack.core.events import CAP_SCROLL
+
+    calls: list[str] = []
+    hook_callbacks: dict[str, Any] = {}
+    raw_callbacks: dict[str, Any] = {}
+
+    class TrackingHook:
+        running = True
+
+        def __init__(self, **kwargs: object) -> None:
+            hook_callbacks.update(kwargs)
+
+        def start(self) -> None:
+            calls.append("hook:start")
+
+        def stop(self) -> None:
+            calls.append("hook:stop")
+            self.running = False
+
+        def join(self, timeout: float | None = None) -> None:
+            calls.append(f"hook:join:{timeout}")
+
+    class TrackingTouchpad:
+        running = False
+
+        def __init__(self, on_scroll: Any) -> None:
+            raw_callbacks["scroll"] = on_scroll
+
+        def start(self) -> bool:
+            calls.append("raw:start")
+            self.running = True
+            return True
+
+        def stop(self) -> None:
+            calls.append("raw:stop")
+            self.running = False
+
+    monkeypatch.setattr(mouse, "Listener", TrackingHook)
+    monkeypatch.setattr(windows_backend, "PrecisionTouchpadScrollListener", TrackingTouchpad)
+
+    backend = _backend_with_fake_user32(_FakeUser32(succeed=True, x=321, y=654))
+    backend.request_enhanced_scroll_capture()
+    events: list[tuple[str, tuple[Any, ...], float]] = []
+    backend.start_listening(lambda *event: events.append(event), CAP_SCROLL)
+    active_status = backend.get_enhanced_scroll_capture_status()
+    assert active_status.requested
+    assert active_status.active
+    assert active_status.degraded_reason is None
+
+    timestamp = 10.0
+    monkeypatch.setattr(time, "perf_counter", lambda: 10.01)
+    raw_callbacks["scroll"](0, -1, timestamp)
+    hook_callbacks["on_scroll"](321.0, 654.0, 0.0, -1.0)
+    backend.stop_listening()
+
+    assert [(kind, payload) for kind, payload, _ in events] == [("scroll", (321, 654, 0, -1))]
+    assert calls == [
+        "raw:start",
+        "hook:start",
+        "hook:stop",
+        "hook:join:2.0",
+        "raw:stop",
+    ]
+    assert not backend.get_enhanced_scroll_capture_status().active
+
+
+def test_hook_only_scroll_preserves_pynput_coordinates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Disabled/unavailable raw capture must retain the established hook behavior."""
+    pytest.importorskip("pynput", exc_type=ImportError)
+    from pynput import mouse
+
+    import cursortrack.backends.windows as windows_backend
+    from cursortrack.core.events import CAP_SCROLL
+
+    hook_callbacks: dict[str, Any] = {}
+
+    class TrackingHook:
+        running = True
+
+        def __init__(self, **kwargs: object) -> None:
+            hook_callbacks.update(kwargs)
+
+        def start(self) -> None:
+            pass
+
+        def stop(self) -> None:
+            self.running = False
+
+        def join(self, timeout: float | None = None) -> None:
+            pass
+
+    class UnavailableTouchpad:
+        running = False
+
+        def __init__(self, _on_scroll: Any) -> None:
+            pass
+
+        def start(self) -> bool:
+            return False
+
+        def stop(self) -> None:
+            pass
+
+    monkeypatch.setattr(mouse, "Listener", TrackingHook)
+    monkeypatch.setattr(windows_backend, "PrecisionTouchpadScrollListener", UnavailableTouchpad)
+
+    backend = _backend_with_fake_user32(_FakeUser32(succeed=False))
+    backend.request_enhanced_scroll_capture()
+    events: list[tuple[str, tuple[Any, ...], float]] = []
+    backend.start_listening(lambda *event: events.append(event), CAP_SCROLL)
+    fallback_status = backend.get_enhanced_scroll_capture_status()
+    assert fallback_status.requested
+    assert not fallback_status.active
+    assert fallback_status.degraded_reason is not None
+    hook_callbacks["on_scroll"](123.0, 456.0, 0.0, -1.0)
+    backend.stop_listening()
+
+    assert [(kind, payload) for kind, payload, _ in events] == [("scroll", (123, 456, 0, -1))]
+
+
+def test_hook_start_failure_stops_started_raw_listener(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Listener startup is one transaction and cannot leak Raw Input ownership."""
+    pytest.importorskip("pynput", exc_type=ImportError)
+    from pynput import mouse
+
+    import cursortrack.backends.windows as windows_backend
+    from cursortrack.core.events import CAP_SCROLL
+
+    calls: list[str] = []
+
+    class FailingHook:
+        running = False
+
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def start(self) -> None:
+            calls.append("hook:start")
+            raise RuntimeError("hook start failed")
+
+        def stop(self) -> None:
+            calls.append("hook:stop")
+
+        def join(self, timeout: float | None = None) -> None:
+            calls.append(f"hook:join:{timeout}")
+
+    class TrackingTouchpad:
+        running = False
+        runtime_error = None
+
+        def __init__(self, _on_scroll: Any) -> None:
+            pass
+
+        def start(self) -> bool:
+            calls.append("raw:start")
+            self.running = True
+            return True
+
+        def stop(self) -> None:
+            calls.append("raw:stop")
+            self.running = False
+
+    monkeypatch.setattr(mouse, "Listener", FailingHook)
+    monkeypatch.setattr(windows_backend, "PrecisionTouchpadScrollListener", TrackingTouchpad)
+
+    backend = _backend_with_fake_user32(_FakeUser32(succeed=True))
+    backend.request_enhanced_scroll_capture()
+    with pytest.raises(RuntimeError, match="hook start failed"):
+        backend.start_listening(lambda *_: None, CAP_SCROLL)
+
+    assert "raw:stop" in calls
+    assert backend._listener is None
+    assert backend._touchpad_listener is None
+
+
+def test_raw_startup_failure_does_not_drop_a_live_thread_reference(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pytest.importorskip("pynput", exc_type=ImportError)
+    from pynput import mouse
+
+    import cursortrack.backends.windows as windows_backend
+    from cursortrack.core.events import CAP_SCROLL
+
+    class UnexpectedHook:
+        def __init__(self, **_kwargs: object) -> None:
+            pytest.fail("pynput must not start after an orphaned raw thread")
+
+    class StuckTouchpad:
+        running = False
+        thread_alive = True
+        runtime_error = "listener did not stop"
+
+        def __init__(self, _on_scroll: Any) -> None:
+            pass
+
+        def start(self) -> bool:
+            raise RuntimeError("startup timed out")
+
+        def stop(self) -> None:
+            pass
+
+    monkeypatch.setattr(mouse, "Listener", UnexpectedHook)
+    monkeypatch.setattr(windows_backend, "PrecisionTouchpadScrollListener", StuckTouchpad)
+
+    backend = _backend_with_fake_user32(_FakeUser32(succeed=True))
+    backend.request_enhanced_scroll_capture()
+    with pytest.raises(RuntimeError, match="could not be stopped"):
+        backend.start_listening(lambda *_: None, CAP_SCROLL)
+
+    assert backend._touchpad_listener is not None
+    assert backend._listener_error == "listener did not stop"
+
+
+def test_touchpad_runtime_failure_is_reported_by_listener_health() -> None:
+    backend = _bare_backend()
+    backend._enhanced_scroll_active = True
+    backend._touchpad_listener = type(
+        "_FailedTouchpad",
+        (),
+        {"runtime_error": "malformed HID report", "running": True},
+    )()
+
+    with pytest.raises(RuntimeError, match="malformed HID report"):
+        backend.check_listener_health()
+    assert not backend.get_enhanced_scroll_capture_status().active
+    assert backend.get_enhanced_scroll_capture_status().degraded_reason == "malformed HID report"

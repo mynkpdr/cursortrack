@@ -281,6 +281,21 @@ class RecordingOrderBackend(MidRecordingFailureBackend):
         return super().read_position()
 
 
+class ListenerHealthFailureBackend(MockBackend):
+    """Backend whose enhanced listener fails after recording has started."""
+
+    enhanced_scroll_requested: ClassVar[bool] = False
+    health_checks: ClassVar[int] = 0
+
+    def request_enhanced_scroll_capture(self) -> None:
+        type(self).enhanced_scroll_requested = True
+
+    def check_listener_health(self) -> None:
+        type(self).health_checks += 1
+        if type(self).health_checks >= 3:
+            raise RuntimeError("native scroll listener failed")
+
+
 def _write_raw_button_session(path: str, gap_frames: int, include_up: bool = True) -> None:
     """Write a minimal session with a left-button down and optional delayed up."""
     body = bytearray()
@@ -1469,6 +1484,42 @@ def test_record_surfaces_mid_session_position_failure_as_truncated_prefix(
     recovered = Session.load(destination)
     assert recovered.truncated is True
     assert len(recovered.events) >= 2
+
+
+def test_record_surfaces_listener_failure_as_truncated_prefix(tmp_path: object) -> None:
+    destination = str(tmp_path) + "/listener-failure.ctrk"
+    ListenerHealthFailureBackend.enhanced_scroll_requested = False
+    ListenerHealthFailureBackend.health_checks = 0
+    BACKEND_CLASSES["mock"] = ListenerHealthFailureBackend
+
+    result = runner.invoke(
+        app,
+        [
+            "record",
+            "--out",
+            destination,
+            "--backend",
+            "mock",
+            "--capture",
+            "move,scroll",
+            "--seconds",
+            "1",
+            "--hz",
+            "20",
+            "--codec",
+            "raw",
+            "--no-spin",
+            "--quiet",
+            "--delay",
+            "0",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert ListenerHealthFailureBackend.enhanced_scroll_requested
+    assert "input listener failed" in result.output
+    assert "native scroll listener failed" in result.output
+    assert Session.load(destination).truncated is True
 
 
 def test_failed_forced_recording_keeps_existing_file_on_backend_loss(tmp_path: object) -> None:

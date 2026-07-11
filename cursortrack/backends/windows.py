@@ -5,10 +5,16 @@ from __future__ import annotations
 import contextlib
 import ctypes
 import sys
+import warnings
 from typing import Any, Callable
 
 from cursortrack.backends._pynput_listener import verify_listener_running
-from cursortrack.backends.base import InputBackend
+from cursortrack.backends._touchpad_scroll import ScrollEventArbiter
+from cursortrack.backends._windows_touchpad import (
+    PrecisionTouchpadScrollListener,
+    windows_touchpad_capture_enabled,
+)
+from cursortrack.backends.base import EnhancedScrollCaptureStatus, InputBackend
 from cursortrack.core.events import CAP_CLICK, CAP_SCROLL
 from cursortrack.core.layout import (
     CoordinateUnit,
@@ -94,6 +100,14 @@ def _last_error() -> int | None:
     return getter() if getter is not None else None
 
 
+def _listener_thread_alive(listener: Any) -> bool:
+    """Read actual thread liveness, falling back for compatible test doubles."""
+    is_alive = getattr(listener, "is_alive", None)
+    if callable(is_alive):
+        return bool(is_alive())
+    return bool(getattr(listener, "running", False))
+
+
 def _declare_prototypes(user32: Any) -> None:
     """Declare ctypes argument/return types for every user32 call we make.
 
@@ -165,6 +179,23 @@ class WindowsBackend(InputBackend):
         self._physical_coordinates_verified = _enable_dpi_awareness(self._user32)
 
         self._listener: Any | None = None
+        self._touchpad_listener: PrecisionTouchpadScrollListener | None = None
+        self._scroll_arbiter: ScrollEventArbiter | None = None
+        self._enhanced_scroll_requested = False
+        self._enhanced_scroll_active = False
+        self._enhanced_scroll_degraded_reason: str | None = None
+        self._listener_error: str | None = None
+
+    def request_enhanced_scroll_capture(self) -> None:
+        """Opt into process-wide Precision Touchpad Raw Input capture."""
+        self._enhanced_scroll_requested = True
+
+    def get_enhanced_scroll_capture_status(self) -> EnhancedScrollCaptureStatus:
+        return EnhancedScrollCaptureStatus(
+            requested=getattr(self, "_enhanced_scroll_requested", False),
+            active=getattr(self, "_enhanced_scroll_active", False),
+            degraded_reason=getattr(self, "_enhanced_scroll_degraded_reason", None),
+        )
 
     def read_position(self) -> tuple[int, int]:
         # A fresh POINT per call: a shared instance-level buffer risked handing
@@ -282,41 +313,115 @@ class WindowsBackend(InputBackend):
         want_scroll = bool(capture_mask & CAP_SCROLL)
         if not (want_click or want_scroll):
             return
+        if (
+            getattr(self, "_listener", None) is not None
+            or getattr(self, "_touchpad_listener", None) is not None
+        ):
+            raise RuntimeError("Windows input listeners are already active.")
+
+        self._touchpad_listener = None
+        self._scroll_arbiter = None
+        self._enhanced_scroll_active = False
+        self._enhanced_scroll_degraded_reason = None
 
         # Dynamic import of pynput listener
         try:
             from pynput import mouse
         except ImportError:
             raise ImportError(
-                "Capturing click, scroll, or touch events requires 'pynput'. "
-                "Install it using 'pip install pynput'."
+                "Capturing click or scroll events requires 'pynput'. "
+                "Install it using 'pip install cursortrack[windows]'."
             )
 
         import time
+
+        def _emit_scroll(_source: str, sdx: int, sdy: int, timestamp: float) -> None:
+            x, y = self.read_position()
+            on_event("scroll", (x, y, sdx, sdy), timestamp)
+
+        def _on_raw_scroll(sdx: int, sdy: int, timestamp: float) -> None:
+            arbiter = self._scroll_arbiter
+            if arbiter is not None:
+                arbiter.emit_raw(sdx, sdy, timestamp)
 
         def _on_click(x: float, y: float, button: Any, pressed: bool) -> None:
             if want_click:
                 on_event("click", (int(x), int(y), button.name, pressed), time.perf_counter())
 
         def _on_scroll(x: float, y: float, sdx: float, sdy: float) -> None:
-            if want_scroll:
-                on_event("scroll", (int(x), int(y), int(sdx), int(sdy)), time.perf_counter())
-
-        self._listener = mouse.Listener(
-            on_click=_on_click if want_click else None,
-            on_scroll=_on_scroll if want_scroll else None,
-        )
-        self._listener.start()
+            timestamp = time.perf_counter()
+            arbiter = self._scroll_arbiter
+            if arbiter is None:
+                on_event(
+                    "scroll",
+                    (int(x), int(y), int(sdx), int(sdy)),
+                    timestamp,
+                )
+                return
+            arbiter.emit_hook(int(sdx), int(sdy), timestamp)
 
         try:
+            enhanced_scroll_enabled = want_scroll and windows_touchpad_capture_enabled(
+                getattr(self, "_enhanced_scroll_requested", False),
+            )
+            if want_scroll and enhanced_scroll_enabled:
+                self._enhanced_scroll_requested = True
+                self._scroll_arbiter = ScrollEventArbiter(_emit_scroll)
+                touchpad_listener = PrecisionTouchpadScrollListener(_on_raw_scroll)
+                self._touchpad_listener = touchpad_listener
+                try:
+                    if not touchpad_listener.start():
+                        self._touchpad_listener = None
+                        self._scroll_arbiter = None
+                        self._enhanced_scroll_degraded_reason = (
+                            "No compatible enabled Precision Touchpad is available."
+                        )
+                    else:
+                        self._enhanced_scroll_active = True
+                except ValueError:
+                    raise
+                except Exception as error:
+                    with contextlib.suppress(Exception):
+                        touchpad_listener.stop()
+                    thread_alive = getattr(
+                        touchpad_listener,
+                        "thread_alive",
+                        touchpad_listener.running,
+                    )
+                    if not thread_alive:
+                        self._touchpad_listener = None
+                    else:
+                        raise RuntimeError(
+                            "Precision Touchpad startup failed and its listener "
+                            f"thread could not be stopped: {error}"
+                        ) from error
+                    self._scroll_arbiter = None
+                    self._enhanced_scroll_degraded_reason = str(error)
+                    warnings.warn(
+                        "Precision Touchpad raw capture could not start; "
+                        f"using the standard wheel hook only: {error}",
+                        RuntimeWarning,
+                        stacklevel=2,
+                    )
+            elif want_scroll and getattr(self, "_enhanced_scroll_requested", False):
+                self._enhanced_scroll_degraded_reason = (
+                    "Enhanced scroll capture is disabled by CURSORTRACK_WINDOWS_TOUCHPAD."
+                )
+
+            self._listener = mouse.Listener(
+                on_click=_on_click if want_click else None,
+                on_scroll=_on_scroll if want_scroll else None,
+            )
+            self._listener.start()
             verify_listener_running(
                 self._listener,
                 "The pynput mouse hook failed to start. Check that no "
                 "security software is blocking the low-level mouse hook and "
                 "that the process has permission to install one.",
             )
-        except RuntimeError:
-            self._listener = None
+            self._listener_error = None
+        except BaseException:
+            self.stop_listening()
             raise
 
     def stop_listening(self) -> None:
@@ -324,8 +429,68 @@ class WindowsBackend(InputBackend):
         # listener teardown races, and detecting a failed *start* is the point
         # of #14, so stop must be best-effort rather than propagating errors.
         if self._listener is not None:
-            with contextlib.suppress(Exception):
+            cleanup_errors: list[str] = []
+            try:
                 self._listener.stop()
-            with contextlib.suppress(Exception):
+            except Exception as error:
+                cleanup_errors.append(f"stop failed: {error}")
+            try:
                 self._listener.join(timeout=2.0)
-            self._listener = None
+            except Exception as error:
+                cleanup_errors.append(f"join failed: {error}")
+            listener_alive = _listener_thread_alive(self._listener)
+            if listener_alive:
+                cleanup_errors.append("listener did not stop within 2 seconds")
+            if cleanup_errors and getattr(self, "_listener_error", None) is None:
+                self._listener_error = "pynput listener cleanup failed: " + "; ".join(
+                    cleanup_errors
+                )
+            if not listener_alive:
+                self._listener = None
+        if self._touchpad_listener is not None:
+            with contextlib.suppress(Exception):
+                self._touchpad_listener.stop()
+            runtime_error = getattr(self._touchpad_listener, "runtime_error", None)
+            if runtime_error is not None:
+                self._listener_error = runtime_error
+                self._enhanced_scroll_degraded_reason = runtime_error
+            thread_alive = getattr(
+                self._touchpad_listener,
+                "thread_alive",
+                self._touchpad_listener.running,
+            )
+            if not thread_alive:
+                self._touchpad_listener = None
+        self._enhanced_scroll_active = False
+        self._scroll_arbiter = None
+
+    def check_listener_health(self) -> None:
+        """Raise if an enabled native listener has failed or stopped."""
+        error = getattr(self, "_listener_error", None)
+        if error is not None:
+            raise RuntimeError(error)
+        mouse_listener = getattr(self, "_listener", None)
+        if mouse_listener is not None:
+            listener_running = bool(getattr(mouse_listener, "running", True))
+            if not listener_running or not _listener_thread_alive(mouse_listener):
+                message = "pynput mouse listener stopped unexpectedly."
+                self._listener_error = message
+                raise RuntimeError(message)
+        touchpad_listener = getattr(self, "_touchpad_listener", None)
+        if touchpad_listener is None:
+            return
+        check_health = getattr(touchpad_listener, "check_health", None)
+        runtime_error = (
+            check_health()
+            if callable(check_health)
+            else getattr(touchpad_listener, "runtime_error", None)
+        )
+        if runtime_error is not None:
+            self._enhanced_scroll_active = False
+            self._enhanced_scroll_degraded_reason = runtime_error
+            raise RuntimeError(runtime_error)
+        if not touchpad_listener.running:
+            message = "Precision Touchpad listener stopped unexpectedly."
+            self._enhanced_scroll_active = False
+            self._enhanced_scroll_degraded_reason = message
+            raise RuntimeError(message)
