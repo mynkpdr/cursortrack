@@ -283,6 +283,8 @@ def record(
     except Exception as e:
         console.print(f"[bold red]Error resolving backend:[/bold red] {e}")
         raise typer.Exit(code=1)
+    if capture & CAP_SCROLL:
+        backend.request_enhanced_scroll_capture()
 
     try:
         scr_w, scr_h = backend.get_screen_size()
@@ -429,6 +431,7 @@ def record(
 
     recording_failed = False
     backend_error: Exception | None = None
+    backend_error_context = "cursor position read failed"
     try:
         # Construct live view if not quiet
         live: Live | None = None
@@ -452,6 +455,14 @@ def record(
 
         while not _STOP and (total_ticks is None or frame < total_ticks):
             next_t += period
+            if needs_listener:
+                try:
+                    backend.check_listener_health()
+                except Exception as e:
+                    backend_error = e
+                    backend_error_context = "input listener failed"
+                    recording_failed = True
+                    break
             try:
                 cur = backend.read_position()
             except Exception as e:
@@ -516,6 +527,13 @@ def record(
         try:
             if needs_listener:
                 backend.stop_listening()
+                try:
+                    backend.check_listener_health()
+                except Exception as e:
+                    if backend_error is None:
+                        backend_error = e
+                        backend_error_context = "input listener failed"
+                    recording_failed = True
                 handle_queued_events()
 
             if buf:
@@ -557,7 +575,7 @@ def record(
             else f"A recoverable prefix was finalized at {out_file}."
         )
         console.print(
-            f"[bold red]Recording stopped because cursor position read failed:[/bold red] "
+            f"[bold red]Recording stopped because {backend_error_context}:[/bold red] "
             f"{backend_error}. {outcome}"
         )
         raise typer.Exit(code=1)

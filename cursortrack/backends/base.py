@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import abc
+from dataclasses import dataclass
 from typing import Any, Callable
 
 from cursortrack.core.layout import (
@@ -12,6 +13,15 @@ from cursortrack.core.layout import (
     MonitorLayout,
     Rect,
 )
+
+
+@dataclass(frozen=True)
+class EnhancedScrollCaptureStatus:
+    """Observable state for an optional native scroll source."""
+
+    requested: bool
+    active: bool
+    degraded_reason: str | None = None
 
 
 class InputBackend(abc.ABC):
@@ -96,6 +106,36 @@ class InputBackend(abc.ABC):
             capture_buttons=False,
             capture_scroll=False,
         )
+
+    def request_enhanced_scroll_capture(self) -> None:
+        """Opt into an available backend-specific high-fidelity scroll source.
+
+        The base implementation records the request as unsupported. Some
+        native sources claim process-wide resources, so library callers must
+        opt in explicitly.
+        """
+        self._enhanced_scroll_requested = True
+
+    def get_enhanced_scroll_capture_status(self) -> EnhancedScrollCaptureStatus:
+        """Return whether enhanced scroll capture was requested and activated."""
+        requested = getattr(self, "_enhanced_scroll_requested", False)
+        return EnhancedScrollCaptureStatus(
+            requested=requested,
+            active=False,
+            degraded_reason=(
+                "This backend does not provide enhanced scroll capture." if requested else None
+            ),
+        )
+
+    def check_listener_health(self) -> None:
+        """Report capture degradation detectable by this backend.
+
+        The default reports no additional health signal. Overrides must be
+        idempotent, callable while listening and immediately after
+        ``stop_listening()``, and preserve detected teardown failures until the
+        next successful ``start_listening()`` call.
+        """
+        return None
 
     @abc.abstractmethod
     def click(self, button: str, pressed: bool) -> None:

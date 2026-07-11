@@ -44,6 +44,14 @@ Create or modify the backend file, e.g. `cursortrack/backends/macos.py` (the Win
 - `scroll(sdx, sdy)`: Emulate scroll wheel events.
 - `start_listening(on_event, capture_mask)`: Establish global background hooks (e.g. using `pynput` or platform native utilities like Quartz or Xlib).
 - `stop_listening()`: Cleanup hooks.
+- `request_enhanced_scroll_capture()`: Optional request for native scroll
+  sources that claim process-wide resources; inspect
+  `get_enhanced_scroll_capture_status()` to distinguish active and degraded
+  fallback states.
+- `check_listener_health()`: Optionally report degradation the backend can
+  detect. Overrides must be idempotent, remain callable after
+  `stop_listening()`, and preserve detected failures until the next successful
+  start.
 
 ### Step 2: Update Package Requirements
 If your backend introduces new platform-specific libraries:
