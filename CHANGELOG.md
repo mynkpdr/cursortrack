@@ -21,6 +21,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `layout_metadata_sufficient` helpers.
 - Documentation for mapping modes and impossible cross-machine cases in
   [docs/playback-mapping.md](docs/playback-mapping.md).
+- Playback-only `--invert-scroll` and `--scroll-scale` controls correct scroll
+  direction and intensity without modifying recordings. Fractional scaling
+  accumulates remainder so low scales preserve small scroll movements (#63).
 
 ### Changed
 - `play` now negotiates compatibility before injection. Same-machine v1/v2 replay

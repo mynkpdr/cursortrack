@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import math
 import sys
 import time
 from typing import Any, Callable, Optional
@@ -35,6 +36,33 @@ _MAPPING_CHOICES = {
     "offset": MappingMode.OFFSET,
     "target-monitor": MappingMode.TARGET_MONITOR,
 }
+_MAX_SCROLL_SCALE = 100.0
+
+
+class _ScrollTransform:
+    """Scale integer scroll steps while preserving fractional remainder."""
+
+    def __init__(self, *, scale: float, invert: bool) -> None:
+        if not math.isfinite(scale) or not 0 < scale <= _MAX_SCROLL_SCALE:
+            raise ValueError(
+                f"scroll scale must be finite and in the range 0 < scale <= {_MAX_SCROLL_SCALE:g}"
+            )
+        self._factor = -scale if invert else scale
+        self._remainder_x = 0.0
+        self._remainder_y = 0.0
+
+    def apply(self, sdx: int, sdy: int) -> tuple[int, int]:
+        self._remainder_x += sdx * self._factor
+        self._remainder_y += sdy * self._factor
+        emitted_x, self._remainder_x = self._take_steps(self._remainder_x)
+        emitted_y, self._remainder_y = self._take_steps(self._remainder_y)
+        return emitted_x, emitted_y
+
+    @staticmethod
+    def _take_steps(value: float) -> tuple[int, float]:
+        adjusted = value + math.copysign(1e-12, value)
+        steps = math.trunc(adjusted)
+        return steps, value - steps
 
 
 def _is_in_corner(x: int, y: int, ox: int, oy: int, w: int, h: int) -> bool:
@@ -157,6 +185,16 @@ def play(
     speed: float = typer.Option(
         1.0, "--speed", "-s", help="Playback speed multiplier (e.g. 2.0 = double speed)."
     ),
+    invert_scroll: bool = typer.Option(
+        False,
+        "--invert-scroll",
+        help="Reverse both horizontal and vertical scroll directions during playback.",
+    ),
+    scroll_scale: float = typer.Option(
+        1.0,
+        "--scroll-scale",
+        help="Scroll-step multiplier (e.g. 0.5 = half, 2.0 = double).",
+    ),
     delay: int = typer.Option(
         3, "--delay", "-d", help="Countdown delay in seconds before playback starts."
     ),
@@ -206,6 +244,11 @@ def play(
     if speed <= 0:
         console.print("[bold red]Error:[/bold red] Playback --speed must be greater than 0.")
         raise typer.Exit(code=1)
+    try:
+        _ScrollTransform(scale=scroll_scale, invert=invert_scroll)
+    except ValueError as error:
+        console.print(f"[bold red]Error:[/bold red] --scroll-scale {error}.")
+        raise typer.Exit(code=1)
 
     try:
         session = Session.load(file)
@@ -247,6 +290,9 @@ def play(
         strict=strict,
     )
     _print_compatibility_report(report, quiet=quiet and not dry_run)
+    if not quiet and (invert_scroll or scroll_scale != 1.0):
+        direction = "inverted" if invert_scroll else "recorded"
+        console.print(f"Scroll transform: direction={direction}, scale={scroll_scale:g}")
     if not report.ok:
         console.print(
             "[bold red]Playback refused:[/bold red] resolve compatibility errors, "
@@ -355,6 +401,7 @@ def play(
         events = session.events
         origin = perf()
         n = len(events)
+        scroll_transform = _ScrollTransform(scale=scroll_scale, invert=invert_scroll)
 
         last_expected_x: int | None = None
         last_expected_y: int | None = None
@@ -424,7 +471,9 @@ def play(
                         else:
                             pressed_buttons.discard(ev.button)
                     elif isinstance(ev, ScrollEvent):
-                        backend.scroll(ev.sdx, ev.sdy)
+                        sdx, sdy = scroll_transform.apply(ev.sdx, ev.sdy)
+                        if sdx or sdy:
+                            backend.scroll(sdx, sdy)
                     elif isinstance(ev, TapEvent):
                         backend.click("left", True)
                         pressed_buttons.add("left")
