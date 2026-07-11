@@ -28,6 +28,15 @@ left-click approximation and are refused in strict mode. Backend restrictions
 such as ``interactive-desktop-only`` and ``xwayland-only`` are included in the
 report.
 
+## Scroll transforms
+
+``--invert-scroll`` flips both scroll axes during playback.
+``--scroll-scale`` multiplies scroll intensity while leaving event timing and
+cursor coordinates unchanged. Values below 1 slow scrolling; values above 1
+increase it. Fractional output is accumulated independently per axis so repeated
+small events are preserved. These options affect every scroll event because v2
+recordings do not retain whether a step originated from a touchpad or wheel.
+
 ## Cases that remain impossible
 
 These cannot be fixed by coordinate mapping:

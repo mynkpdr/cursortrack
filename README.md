@@ -73,11 +73,18 @@ cursortrack play session.ctrk --speed 2.0
 
 # Explicitly scale a recording onto a different desktop size
 cursortrack play session.ctrk --mapping scale-to-bounds
+
+# Correct scroll direction and replay at half scroll intensity
+cursortrack play session.ctrk --invert-scroll --scroll-scale 0.5
 ```
 > [!IMPORTANT]
 > **FAIL-SAFE:** If a playback gets out of control, push the mouse cursor physically to any corner of your monitor or press the **Esc** key globally on your keyboard to stop emulation immediately.
 >
 > Playback never silently remaps coordinates. Use `--dry-run` to inspect source/target layout and capability mismatches, then choose an explicit `--mapping` (`absolute`, `scale-to-bounds`, `offset`, or `target-monitor`) when desktops differ. See [docs/playback-mapping.md](docs/playback-mapping.md).
+>
+> `--invert-scroll` and `--scroll-scale` are playback-only transformations:
+> they do not modify the recording. Fractional scales retain remainder between
+> events, so reducing intensity does not systematically discard small steps.
 
 ### 3. Display Session Info
 ```bash
