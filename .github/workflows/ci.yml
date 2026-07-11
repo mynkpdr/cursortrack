@@ -84,7 +84,7 @@ jobs:
     # Linux job type checks it for real (and symmetrically excludes windows.py).
     - name: Type check with mypy (Linux-only backend is checked for real on the Linux job)
       run: |
-        mypy --follow-imports=silent cursortrack/__init__.py cursortrack/__main__.py cursortrack/core cursortrack/export cursortrack/cli cursortrack/backends/__init__.py cursortrack/backends/base.py cursortrack/backends/windows.py cursortrack/backends/macos.py
+        mypy --follow-imports=silent cursortrack/__init__.py cursortrack/__main__.py cursortrack/core cursortrack/export cursortrack/cli cursortrack/backends/__init__.py cursortrack/backends/base.py cursortrack/backends/_touchpad_scroll.py cursortrack/backends/_windows_hid.py cursortrack/backends/_windows_touchpad.py cursortrack/backends/windows.py cursortrack/backends/macos.py
 
     - name: Run tests with pytest
       run: |
